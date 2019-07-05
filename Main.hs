@@ -58,11 +58,13 @@ sendMain = do
   socketPath :: FilePath <-
     getRepldSocketPath
 
+  bytes <- ByteString.hGetContents stdin
+  ByteString.hPutStr stdout bytes
+
   withUnixSocket
     (\sock -> do
       connect sock (SockAddrUnix socketPath) `catchAny` \_ ->
         exitWith (ExitFailure 1)
-      bytes <- ByteString.hGetContents stdin
       sendAll sock bytes)
 
 
