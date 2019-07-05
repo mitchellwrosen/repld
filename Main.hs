@@ -2,25 +2,28 @@
 
 module Main where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent (forkIO)
-import Control.Concurrent.Async
-import Control.Concurrent.STM
-import Control.Exception.Safe
-import Control.Monad
+import Control.Concurrent.Async (Async, waitEitherSTM_, withAsync)
+import Control.Concurrent.STM (atomically)
+import Control.Exception.Safe (bracket, catchAny, finally)
+import Control.Monad (forever, join, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Managed (Managed, managed, runManaged)
 import Data.ByteString (ByteString)
 import Data.Foldable (fold)
-import Data.Function
+import Data.Function ((&))
 import Network.Socket
-import Network.Socket.ByteString
+import Network.Socket.ByteString (recv, sendAll)
+import System.Console.ANSI (clearFromCursorToScreenEnd, setCursorPosition)
 import System.Directory
-import System.Exit
+import System.Exit (ExitCode(ExitFailure), exitWith)
 import System.IO
 import System.Process.Typed
 
 import qualified Data.ByteString as ByteString
 import qualified Options.Applicative as Opt
+
 
 main :: IO ()
 main =
@@ -50,7 +53,7 @@ main =
 
 
 --------------------------------------------------------------------------------
--- Serve
+-- Send
 --------------------------------------------------------------------------------
 
 sendMain :: IO ()
@@ -81,12 +84,11 @@ serveMain replCommand = do
     getRepldSocketPath
 
   let
-    replProcessConfig :: ProcessConfig Handle Handle Handle
+    replProcessConfig :: ProcessConfig Handle () ()
     replProcessConfig =
       shell replCommand
+        & setDelegateCtlc True
         & setStdin createPipe
-        & setStdout createPipe
-        & setStderr createPipe
 
   withUnixSocket
     (\sock -> do
@@ -99,51 +101,28 @@ serveMain replCommand = do
 
 serveMain2
   :: Socket
-  -> Process Handle Handle Handle
+  -> Process Handle () ()
   -> IO ()
 serveMain2 sock replProcess = do
-  stdinChan <- newTChanIO
-
   hSetBuffering (getStdin replProcess)  NoBuffering
-  hSetBuffering (getStdout replProcess) NoBuffering
-  hSetBuffering (getStderr replProcess) NoBuffering
 
   runManaged do
     acceptAsync <-
       managedAsync
         (acceptThread
           (accept sock)
-          (atomically . writeTChan stdinChan))
+          (ByteString.hPut (getStdin replProcess)))
 
     stdinAsync <-
       managedAsync
         (stdinThread
           (ByteString.hPut (getStdin replProcess)))
 
-    replStdinAsync <-
-      managedAsync
-        (replStdinThread
-          (atomically (readTChan stdinChan))
-          (ByteString.hPut (getStdin replProcess)))
+    (liftIO . atomically)
+      (waitEitherSTM_ acceptAsync stdinAsync <|>
+        void (waitExitCodeSTM replProcess))
 
-    replStdoutAsync <-
-      managedAsync
-        (replStdoutThread
-          (ByteString.hGetSome (getStdout replProcess) 4096))
-
-    replStderrAsync <-
-      managedAsync
-        (replStderrThread
-          (ByteString.hGetSome (getStderr replProcess) 4096))
-
-    (liftIO . void . waitAny)
-      [ acceptAsync
-      , stdinAsync
-      , replStdinAsync
-      , replStdoutAsync
-      , replStderrAsync
-      ]
-
+-- | Accept clients forever.
 acceptThread
   :: IO (Socket, SockAddr)
   -> (ByteString -> IO ())
@@ -156,6 +135,8 @@ acceptThread acceptClient handleInput =
     -- Ephemeral background thread for each client - don't care if/how it dies.
     void (forkIO (clientThread clientSock handleInput))
 
+-- | Forward stdin to this process onto the repl. This makes the foregrounded
+-- repld server interactive.
 stdinThread
   :: (ByteString -> IO ())
   -> IO ()
@@ -169,7 +150,12 @@ stdinThread handleInput =
         bytes <- ByteString.hGetLine stdin
         handleInput (bytes <> ByteString.singleton 10)
 
--- Handle one connected client's socket by forwarding all data received.
+-- | Handle one connected client's socket by forwarding all data on stdin to
+-- the repl.
+--
+-- Clears the screen before forwarding to the repl, because although the input
+-- is on a stream socket, I am assuming that I receive an entire "request" in
+-- one 8K read.
 clientThread
   :: Socket
   -> (ByteString -> IO ())
@@ -180,50 +166,12 @@ clientThread sock handleInput =
   where
     loop :: IO ()
     loop = do
-      bytes <- recv sock 4096
+      bytes <- recv sock 8192
 
       unless (ByteString.null bytes) do
+        setCursorPosition 0 0
+        clearFromCursorToScreenEnd
         handleInput bytes
-        loop
-
-replStdinThread
-  :: IO ByteString -- Action that receives input from a connected client
-  -> (ByteString -> IO ()) -- Write to repl process's stdin
-  -> IO ()
-replStdinThread receiveInput putReplStdin =
-  forever do
-    bytes <- receiveInput
-    ByteString.hPutStr stdout bytes
-    putReplStdin bytes
-
-replStdoutThread
-  :: IO ByteString -- Action that receives stdout from the repl
-  -> IO ()
-replStdoutThread getReplStdout =
-  loop
-
-  where
-    loop :: IO ()
-    loop = do
-      bytes <- getReplStdout
-
-      unless (ByteString.null bytes) do
-        ByteString.hPutStr stdout bytes
-        loop
-
-replStderrThread
-  :: IO ByteString -- Action that receives stderr from the repl
-  -> IO ()
-replStderrThread getReplStderr =
-  loop
-
-  where
-    loop :: IO ()
-    loop = do
-      bytes <- getReplStderr
-
-      unless (ByteString.null bytes) do
-        ByteString.hPutStr stderr bytes
         loop
 
 

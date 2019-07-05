@@ -5,6 +5,7 @@ version: 0
 
 executable repld
   build-depends:
+    ansi-terminal,
     async,
     base,
     bytestring,
