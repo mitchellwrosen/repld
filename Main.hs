@@ -7,7 +7,7 @@ import Control.Concurrent (forkIO)
 import Control.Concurrent.Async (Async, waitEitherSTM_, withAsync)
 import Control.Concurrent.STM (atomically)
 import Control.Exception.Safe (bracket, catchAny, finally)
-import Control.Monad (forever, join, unless, void)
+import Control.Monad (forever, join, unless, when, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Managed (Managed, managed, runManaged)
 import Data.ByteString (ByteString)
@@ -47,7 +47,10 @@ main =
             "serve"
             (Opt.info
               (serveMain
-                <$> Opt.strArgument (Opt.metavar "COMMAND"))
+                <$> Opt.strArgument (Opt.metavar "COMMAND")
+                <*> Opt.switch
+                      (Opt.long "clear" <>
+                       Opt.help "Clear the terminal before outputing text"))
               (Opt.progDesc "Serve COMMAND"))
           ])
 
@@ -75,8 +78,8 @@ sendMain = do
 -- Serve
 --------------------------------------------------------------------------------
 
-serveMain :: String -> IO ()
-serveMain replCommand = do
+serveMain :: String -> Bool -> IO ()
+serveMain replCommand clear = do
   hSetBuffering stdout NoBuffering
   hSetBuffering stderr NoBuffering
 
@@ -95,21 +98,23 @@ serveMain replCommand = do
       bind sock (SockAddrUnix socketPath)
       listen sock 5
       withProcessWait replProcessConfig \replProcess -> do
-        serveMain2 sock replProcess
+        serveMain2 clear sock replProcess
         stopProcess replProcess)
     `finally` ignoringExceptions (removeFile socketPath)
 
 serveMain2
-  :: Socket
+  :: Bool
+  -> Socket
   -> Process Handle () ()
   -> IO ()
-serveMain2 sock replProcess = do
+serveMain2 clear sock replProcess = do
   hSetBuffering (getStdin replProcess)  NoBuffering
 
   runManaged do
     acceptAsync <-
       managedAsync
         (acceptThread
+          clear
           (accept sock)
           (ByteString.hPut (getStdin replProcess)))
 
@@ -124,16 +129,17 @@ serveMain2 sock replProcess = do
 
 -- | Accept clients forever.
 acceptThread
-  :: IO (Socket, SockAddr)
+  :: Bool
+  -> IO (Socket, SockAddr)
   -> (ByteString -> IO ())
   -> IO ()
-acceptThread acceptClient handleInput =
+acceptThread clear acceptClient handleInput =
   forever do
     (clientSock, _clientSockAddr) <-
       acceptClient
 
     -- Ephemeral background thread for each client - don't care if/how it dies.
-    void (forkIO (clientThread clientSock handleInput))
+    void (forkIO (clientThread clear clientSock handleInput))
 
 -- | Forward stdin to this process onto the repl. This makes the foregrounded
 -- repld server interactive.
@@ -157,10 +163,11 @@ stdinThread handleInput =
 -- is on a stream socket, I am assuming that I receive an entire "request" in
 -- one 8K read.
 clientThread
-  :: Socket
+  :: Bool
+  -> Socket
   -> (ByteString -> IO ())
   -> IO ()
-clientThread sock handleInput =
+clientThread clear sock handleInput =
   loop
 
   where
@@ -169,8 +176,9 @@ clientThread sock handleInput =
       bytes <- recv sock 8192
 
       unless (ByteString.null bytes) do
-        setCursorPosition 0 0
-        clearFromCursorToScreenEnd
+        when clear do
+          setCursorPosition 0 0
+          clearFromCursorToScreenEnd
         handleInput bytes
         loop
 

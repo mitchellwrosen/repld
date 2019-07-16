@@ -6,7 +6,8 @@ case "$1" in
     ;;
 
   "install")
-    cabal v2-build
+    set -e
+    cabal -v0 v2-build
     cp $(cabal-plan list-bin repld) ~/.local/bin
     ;;
 
