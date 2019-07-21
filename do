@@ -11,8 +11,22 @@ case "$1" in
     cp $(cabal-plan list-bin repld) ~/.local/bin
     ;;
 
+  "repl")
+    cabal v2-repl -O0
+    ;;
+
   "run")
     shift
     exec cabal v2-run -- repld "$@"
     ;;
+
+  *)
+    echo "Usage: do COMMAND"
+    echo ""
+    echo "Available commands:"
+    echo ""
+    echo "  dev"
+    echo "  install"
+    echo "  repl"
+    echo "  run"
 esac
