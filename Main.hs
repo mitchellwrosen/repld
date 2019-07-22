@@ -130,21 +130,13 @@ doServeMain echo sock replProcess = do
       void (waitExitCodeSTM replProcess))
 
   where
-    handleClientInput :: ByteString -> IO ()
-    handleClientInput bytes = do
-      input :: Text <-
-        either throwIO pure (Text.decodeUtf8' bytes)
-
+    handleClientInput :: [Text] -> IO ()
+    handleClientInput input = do
       Console.setCursorPosition 0 0
       Console.clearFromCursorToScreenEnd
 
-      let
-        canonicalInput :: [Text]
-        canonicalInput =
-          canonicalize input
-
       when echo do
-        for_ canonicalInput \line ->
+        for_ input \line ->
           Text.putStrLn
             (fold
               [ Text.pack
@@ -164,7 +156,7 @@ doServeMain echo sock replProcess = do
           _ ->
             pure ()
 
-      Text.hPutStr replProcessStdin (Text.unlines canonicalInput)
+      Text.hPutStr replProcessStdin (Text.unlines input)
 
     handleLocalInput :: Text -> IO ()
     handleLocalInput =
@@ -174,17 +166,10 @@ doServeMain echo sock replProcess = do
     replProcessStdin =
       getStdin replProcess
 
-    canonicalize :: Text -> [Text]
-    canonicalize text = do
-      line <- Text.lines text
-      let line' = Text.strip line
-      guard (not (Text.null line'))
-      pure line'
-
 -- | Accept clients forever.
 acceptThread
   :: IO (Socket, SockAddr)
-  -> (ByteString -> IO ())
+  -> ([Text] -> IO ())
   -> IO ()
 acceptThread acceptClient handleInput =
   forever do
@@ -202,15 +187,12 @@ stdinThread
 stdinThread handleInput =
   ignoringExceptions (forever (Text.getLine >>= handleInput))
 
--- | Handle one connected client's socket by forwarding all data on stdin to
--- the repl.
---
--- Clears the screen before forwarding to the repl, because although the input
--- is on a stream socket, I am assuming that I receive an entire "request" in
--- one 8K read.
+-- | Handle one connected client's socket by forwarding all lines to the repl.
+-- Although the input is on a stream socket, I am assuming that I receive an
+-- entire "request" in one 8K read.
 clientThread
   :: Socket
-  -> (ByteString -> IO ())
+  -> ([Text] -> IO ())
   -> IO ()
 clientThread sock handleInput =
   fix \loop -> do
@@ -218,8 +200,17 @@ clientThread sock handleInput =
       recv sock 8192
 
     unless (ByteString.null bytes) do
-      handleInput bytes
+      text :: Text <-
+        either throwIO pure (Text.decodeUtf8' bytes)
+      handleInput (canonicalize text)
       loop
+
+  where
+    canonicalize :: Text -> [Text]
+    canonicalize text = do
+      line <- Text.strip <$> Text.lines text
+      guard (not (Text.null line))
+      pure line
 
 
 --------------------------------------------------------------------------------
