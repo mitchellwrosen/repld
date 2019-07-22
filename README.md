@@ -12,9 +12,8 @@ Send input to it from another shell:
 > repld send <<< 'create table foo (bar int);'
 ```
 
-If you want to see the input you send echoed, run `repld serve` with `--echo`.
-
-If you want to clear the screen before showing output, run `repld serve` with `--clear`.
+If you want to see the input you send via `repl send` echoed, run `repld serve`
+with `--echo`.
 
 ### vim
 

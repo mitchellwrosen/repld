@@ -1,28 +1,31 @@
-{-# LANGUAGE BlockArguments, LambdaCase, ScopedTypeVariables #-}
+{-# LANGUAGE BlockArguments, LambdaCase, OverloadedStrings, ScopedTypeVariables #-}
 
 module Main where
 
 import Control.Applicative ((<|>))
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, threadWaitReadSTM)
 import Control.Concurrent.Async (Async, waitEitherSTM_, withAsync)
-import Control.Concurrent.STM (atomically)
+import Control.Concurrent.STM
 import Control.Exception.Safe (bracket, bracket_, catchAny)
 import Control.Monad (forever, join, unless, when, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Managed (Managed, managed, runManaged)
 import Data.ByteString (ByteString)
-import Data.Foldable (fold)
+import Data.Foldable (asum, fold, for_)
 import Data.Function ((&))
 import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
-import System.Console.ANSI (clearFromCursorToScreenEnd, setCursorPosition)
 import System.Directory
 import System.Exit (ExitCode(ExitFailure), exitWith)
 import System.IO
 import System.Process.Typed
 
 import qualified Data.ByteString as ByteString
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Data.Text.IO as Text
 import qualified Options.Applicative as Opt
+import qualified System.Console.ANSI as Console
 
 
 main :: IO ()
@@ -48,9 +51,6 @@ main =
             (Opt.info
               (serveMain
                 <$> Opt.strArgument (Opt.metavar "COMMAND")
-                <*> Opt.switch
-                      (Opt.long "clear" <>
-                       Opt.help "Clear the terminal before outputing text")
                 <*> Opt.switch
                       (Opt.long "echo" <>
                        Opt.help "Echo the input sent to the server"))
@@ -80,8 +80,8 @@ sendMain = do
 -- Serve
 --------------------------------------------------------------------------------
 
-serveMain :: String -> Bool -> Bool -> IO ()
-serveMain replCommand clear echo = do
+serveMain :: String -> Bool -> IO ()
+serveMain replCommand echo = do
   hSetBuffering stdout NoBuffering
   hSetBuffering stderr NoBuffering
 
@@ -103,16 +103,15 @@ serveMain replCommand clear echo = do
         (do
           listen sock 5
           withProcessWait replProcessConfig \replProcess -> do
-            serveMain2 clear echo sock replProcess
+            serveMain2 echo sock replProcess
             stopProcess replProcess))
 
 serveMain2
   :: Bool
-  -> Bool
   -> Socket
   -> Process Handle () ()
   -> IO ()
-serveMain2 clear echo sock replProcess = do
+serveMain2 echo sock replProcess = do
   hSetBuffering (getStdin replProcess)  NoBuffering
 
   runManaged do
@@ -121,16 +120,35 @@ serveMain2 clear echo sock replProcess = do
         (acceptThread
           (accept sock)
           (\input -> do
-            when clear do
-              setCursorPosition 0 0
-              clearFromCursorToScreenEnd
+            Console.setCursorPosition 0 0
+            Console.clearFromCursorToScreenEnd
+
             when echo do
-              ByteString.hPut stdout input
+              case Text.decodeUtf8' input of
+                Left _ ->
+                  pure ()
+
+                Right text ->
+                  for_ (Text.lines text) \line ->
+                    Text.putStrLn $
+                      fold
+                        [ Text.pack
+                            (Console.setSGRCode
+                              [Console.SetColor
+                                Console.Foreground
+                                Console.Vivid
+                                Console.Blue])
+                        , "≫ "
+                        , Text.pack (Console.setSGRCode [Console.Reset])
+                        , line
+                        ]
+
             ByteString.hPut (getStdin replProcess) input))
 
     stdinAsync :: Async () <-
       managedAsync
         (stdinThread
+          retry
           (ByteString.hPut (getStdin replProcess)))
 
     (liftIO . atomically)
@@ -153,17 +171,37 @@ acceptThread acceptClient handleInput =
 -- | Forward stdin to this process onto the repl. This makes the foregrounded
 -- repld server interactive.
 stdinThread
-  :: (ByteString -> IO ())
+     -- | STM action that asks this thread to stop reading stdin, and returns an
+     -- IO action that, when executed, blocks until this thread should continue
+     -- reading stdin.
+     --
+     -- This crappy confusing control signal is necessary because of how reading
+     -- the current cursor position works: first it emits some ANSI control
+     -- characters on stdout,
+  :: STM (IO ())
+  -> (ByteString -> IO ())
   -> IO ()
-stdinThread handleInput =
+stdinThread stopReading handleInput =
   ignoringExceptions loop
 
   where
     loop :: IO ()
     loop =
       forever do
-        bytes <- ByteString.hGetLine stdin
-        handleInput (bytes <> ByteString.singleton 10)
+        (ready, deregister) <- threadWaitReadSTM 0
+        (join . atomically)
+          (asum
+            [ do
+                ready
+                pure do
+                  deregister
+                  bytes <- ByteString.hGetLine stdin
+                  handleInput (bytes <> ByteString.singleton 10)
+
+            , do
+                continueReading <- stopReading
+                pure continueReading
+            ])
 
 -- | Handle one connected client's socket by forwarding all data on stdin to
 -- the repl.
@@ -181,7 +219,8 @@ clientThread sock handleInput =
   where
     loop :: IO ()
     loop = do
-      bytes <- recv sock 8192
+      bytes :: ByteString <-
+        recv sock 8192
 
       unless (ByteString.null bytes) do
         handleInput bytes
