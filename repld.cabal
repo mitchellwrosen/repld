@@ -15,6 +15,7 @@ executable repld
     optparse-applicative,
     safe-exceptions,
     stm,
+    terminal-size,
     text,
     typed-process >= 0.2.5,
   default-language: Haskell2010

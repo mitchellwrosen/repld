@@ -5,17 +5,18 @@ module Main where
 import Control.Applicative ((<|>))
 import Control.Concurrent (forkIO)
 import Control.Concurrent.Async (Async, waitEitherSTM_, withAsync)
-import Control.Concurrent.STM
-import Control.Exception.Safe (bracket, bracket_, catchAny)
-import Control.Monad (forever, join, unless, when, void)
+import Control.Concurrent.STM (atomically)
+import Control.Exception.Safe (bracket, bracket_, catchAny, throwIO)
+import Control.Monad (forever, guard, join, unless, when, void)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Managed (Managed, managed, runManaged)
 import Data.ByteString (ByteString)
 import Data.Foldable (fold, for_)
-import Data.Function ((&))
+import Data.Function ((&), fix)
+import Data.Text (Text)
 import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
-import System.Directory
+import System.Directory (XdgDirectory(..), getXdgDirectory, removeFile)
 import System.Exit (ExitCode(ExitFailure), exitWith)
 import System.IO
 import System.Process.Typed
@@ -26,6 +27,7 @@ import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
 import qualified Options.Applicative as Opt
 import qualified System.Console.ANSI as Console
+import qualified System.Console.Terminal.Size as Console
 
 
 main :: IO ()
@@ -84,23 +86,23 @@ sendMain =
 --------------------------------------------------------------------------------
 
 serveMain :: String -> Bool -> IO ()
-serveMain replCommand echo = do
-  hSetBuffering stdout NoBuffering
-  hSetBuffering stderr NoBuffering
+serveMain replCommand echo =
+  runManaged do
+    disableBuffering stdout
+    disableBuffering stderr
 
-  socketPath :: FilePath <-
-    getRepldSocketPath
+    socketPath :: FilePath <-
+      getRepldSocketPath
 
-  withUnixSocket
-    (\sock ->
-      bracket_
-        (bind sock (SockAddrUnix socketPath))
-        (ignoringExceptions (removeFile socketPath))
-        (do
-          listen sock 5
-          withProcessWait replProcessConfig \replProcess -> do
-            doServeMain echo sock replProcess
-            stopProcess replProcess))
+    sock :: Socket <-
+      managedUnixSocketServer socketPath
+
+    replProcess :: Process Handle () () <-
+      managedProcess replProcessConfig
+
+    doServeMain echo sock replProcess
+
+    stopProcess replProcess
 
   where
     replProcessConfig :: ProcessConfig Handle () ()
@@ -113,48 +115,71 @@ doServeMain
   :: Bool
   -> Socket
   -> Process Handle () ()
-  -> IO ()
-doServeMain echo sock replProcess =
-  runManaged do
-    liftIO (hSetBuffering (getStdin replProcess) NoBuffering)
+  -> Managed ()
+doServeMain echo sock replProcess = do
+  disableBuffering replProcessStdin
 
-    acceptAsync :: Async () <-
-      managedAsync (acceptThread (accept sock) handleInput)
+  acceptAsync :: Async () <-
+    managedAsync (acceptThread (accept sock) handleClientInput)
 
-    stdinAsync :: Async () <-
-      managedAsync (stdinThread (ByteString.hPut (getStdin replProcess)))
+  stdinAsync :: Async () <-
+    managedAsync (stdinThread handleLocalInput)
 
-    (liftIO . atomically)
-      (waitEitherSTM_ acceptAsync stdinAsync <|>
-        void (waitExitCodeSTM replProcess))
+  (liftIO . atomically)
+    (waitEitherSTM_ acceptAsync stdinAsync <|>
+      void (waitExitCodeSTM replProcess))
 
   where
-    handleInput :: ByteString -> IO ()
-    handleInput input = do
+    handleClientInput :: ByteString -> IO ()
+    handleClientInput bytes = do
+      input :: Text <-
+        either throwIO pure (Text.decodeUtf8' bytes)
+
       Console.setCursorPosition 0 0
       Console.clearFromCursorToScreenEnd
 
+      let
+        canonicalInput :: [Text]
+        canonicalInput =
+          canonicalize input
+
       when echo do
-        case Text.decodeUtf8' input of
-          Left _ ->
+        for_ canonicalInput \line ->
+          Text.putStrLn
+            (fold
+              [ Text.pack
+                  (Console.setSGRCode
+                    [Console.SetColor
+                      Console.Foreground
+                      Console.Vivid
+                      Console.Blue])
+              , "≫ "
+              , Text.pack (Console.setSGRCode [Console.Reset])
+              , line
+              ])
+
+        Console.size >>= \case
+          Just (Console.Window _ width) ->
+            Text.putStrLn (Text.replicate width "─")
+          _ ->
             pure ()
 
-          Right text ->
-            for_ (Text.lines text) \line ->
-              Text.putStrLn $
-                fold
-                  [ Text.pack
-                      (Console.setSGRCode
-                        [Console.SetColor
-                          Console.Foreground
-                          Console.Vivid
-                          Console.Blue])
-                  , "≫ "
-                  , Text.pack (Console.setSGRCode [Console.Reset])
-                  , line
-                  ]
+      Text.hPutStr replProcessStdin (Text.unlines canonicalInput)
 
-      ByteString.hPut (getStdin replProcess) input
+    handleLocalInput :: Text -> IO ()
+    handleLocalInput =
+      Text.hPutStrLn replProcessStdin
+
+    replProcessStdin :: Handle
+    replProcessStdin =
+      getStdin replProcess
+
+    canonicalize :: Text -> [Text]
+    canonicalize text = do
+      line <- Text.lines text
+      let line' = Text.strip line
+      guard (not (Text.null line'))
+      pure line'
 
 -- | Accept clients forever.
 acceptThread
@@ -172,17 +197,10 @@ acceptThread acceptClient handleInput =
 -- | Forward stdin to this process onto the repl. This makes the foregrounded
 -- repld server interactive.
 stdinThread
-  :: (ByteString -> IO ())
+  :: (Text -> IO ())
   -> IO ()
 stdinThread handleInput =
-  ignoringExceptions loop
-
-  where
-    loop :: IO ()
-    loop =
-      forever do
-        bytes <- ByteString.hGetLine stdin
-        handleInput (bytes <> ByteString.singleton 10)
+  ignoringExceptions (forever (Text.getLine >>= handleInput))
 
 -- | Handle one connected client's socket by forwarding all data on stdin to
 -- the repl.
@@ -195,36 +213,26 @@ clientThread
   -> (ByteString -> IO ())
   -> IO ()
 clientThread sock handleInput =
-  loop
+  fix \loop -> do
+    bytes :: ByteString <-
+      recv sock 8192
 
-  where
-    loop :: IO ()
-    loop = do
-      bytes :: ByteString <-
-        recv sock 8192
-
-      unless (ByteString.null bytes) do
-        handleInput bytes
-        loop
+    unless (ByteString.null bytes) do
+      handleInput bytes
+      loop
 
 
 --------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------
 
+disableBuffering :: MonadIO m => Handle -> m ()
+disableBuffering h =
+  liftIO (hSetBuffering h NoBuffering)
+
 getRepldSocketPath :: MonadIO m => m FilePath
 getRepldSocketPath =
   liftIO (getXdgDirectory XdgData "repld.sock")
-
-withUnixSocket :: (Socket -> IO a) -> IO a
-withUnixSocket =
-  bracket
-    (socket AF_UNIX Stream defaultProtocol)
-    close
-
-managedUnixSocket :: Managed Socket
-managedUnixSocket =
-  managed withUnixSocket
 
 -- | Run an IO action, ignoring synchronous exceptions
 ignoringExceptions :: IO () -> IO ()
@@ -234,3 +242,28 @@ ignoringExceptions action =
 managedAsync :: IO a -> Managed (Async a)
 managedAsync action =
   managed (withAsync action)
+
+managedProcess :: ProcessConfig a b c -> Managed (Process a b c)
+managedProcess config =
+  managed (withProcessWait config)
+
+managedUnixSocket :: Managed Socket
+managedUnixSocket =
+  managed
+    (bracket
+      (socket AF_UNIX Stream defaultProtocol)
+      close)
+
+managedUnixSocketServer :: FilePath -> Managed Socket
+managedUnixSocketServer path = do
+  sock :: Socket <-
+    managedUnixSocket
+
+  managed
+    (\k ->
+      bracket_
+        (bind sock (SockAddrUnix path))
+        (ignoringExceptions (removeFile path))
+        (do
+          listen sock 5
+          k sock))
