@@ -23,7 +23,7 @@ import Data.List.Split (splitOn)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Network.Socket
-import Network.Socket.ByteString (recv, sendAll)
+import Network.Socket.ByteString (recv)
 import System.Directory (XdgDirectory(..), doesFileExist, getXdgDirectory, removeFile)
 import System.Exit (ExitCode(ExitFailure), exitWith)
 import System.IO
@@ -35,8 +35,13 @@ import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
 import qualified Options.Applicative as Opt
 import qualified System.Console.ANSI as Console
+import qualified System.Console.Haskeline as Haskeline
 import qualified System.Console.Terminal.Size as Console
 
+
+-- | Repls we recognize.
+data Repl
+  = Ghci
 
 main :: IO ()
 main =
@@ -53,38 +58,6 @@ main =
         <*> Opt.switch
               (Opt.long "no-echo" <>
                 Opt.help "Don't echo the input sent to the server")
-
---------------------------------------------------------------------------------
--- Send
---------------------------------------------------------------------------------
-
-sendMain :: IO ()
-sendMain =
-  runManaged do
-    socketPath :: FilePath <-
-      getRepldSocketPath
-
-    bytes :: ByteString <-
-      liftIO (ByteString.hGetContents stdin)
-
-    sock :: Socket <-
-      managedUnixSocket
-
-    liftIO
-      (connect sock (SockAddrUnix socketPath) `catchAny` \_ ->
-        exitWith (ExitFailure 1))
-
-    liftIO (sendAll sock bytes)
-
--- ()
-
---------------------------------------------------------------------------------
--- Serve
---------------------------------------------------------------------------------
-
--- | Repls we recognize.
-data Repl
-  = Ghci
 
 serveMain :: String -> Bool -> IO ()
 serveMain replCommand (not -> echo) =
@@ -104,13 +77,13 @@ serveMain replCommand (not -> echo) =
     sock :: Socket <-
       managedUnixSocketServer socketPath
 
-    replProcess :: Process Handle () () <-
-      managedProcess replProcessConfig
+    repl :: Process Handle () () <-
+      managedProcess (replProcessConfig replCommand)
 
     let
-      replProcessStdin :: Handle
-      replProcessStdin =
-        getStdin replProcess
+      replStdin :: Handle
+      replStdin =
+        getStdin repl
 
     let
       handleClientInput :: Text -> IO ()
@@ -135,14 +108,14 @@ serveMain replCommand (not -> echo) =
           for_ width \width ->
             Text.putStrLn (Text.replicate width "─")
 
-        Text.hPutStr replProcessStdin (Text.unlines input)
+        Text.hPutStr replStdin (Text.unlines input)
 
     let
       handleLocalInput :: Text -> IO ()
       handleLocalInput =
-        Text.hPutStrLn replProcessStdin
+        Text.hPutStrLn replStdin
 
-    disableBuffering replProcessStdin
+    disableBuffering replStdin
 
     acceptAsync :: Async () <-
       managedAsync (acceptThread (accept sock) handleClientInput)
@@ -152,17 +125,11 @@ serveMain replCommand (not -> echo) =
 
     (liftIO . atomically)
       (waitEitherSTM_ acceptAsync stdinAsync <|>
-        void (waitExitCodeSTM replProcess))
+        void (waitExitCodeSTM repl))
 
-    stopProcess replProcess
+    stopProcess repl
 
   where
-    replProcessConfig :: ProcessConfig Handle () ()
-    replProcessConfig =
-      shell replCommand
-        & setDelegateCtlc True
-        & setStdin createPipe
-
     parseRepl :: String -> Maybe Repl
     parseRepl command =
       asum
@@ -172,6 +139,11 @@ serveMain replCommand (not -> echo) =
         , Ghci <$ guard ("stack " `isPrefixOf` command)
         ]
 
+replProcessConfig :: String -> ProcessConfig Handle () ()
+replProcessConfig command =
+  shell command
+    & setDelegateCtlc True
+    & setStdin createPipe
 
 -- | Canonicalize client input by:
 --
@@ -206,8 +178,6 @@ canonicalizeClientInput repl text = do
         Just Ghci ->
           \s -> fromMaybe s (Text.stripPrefix "-- " s)
 
-
-
 -- | Accept clients forever.
 acceptThread
   :: IO (Socket, SockAddr)
@@ -227,7 +197,17 @@ stdinThread
   :: (Text -> IO ())
   -> IO ()
 stdinThread handleInput =
-  ignoringExceptions (forever (Text.getLine >>= handleInput))
+  Haskeline.runInputT Haskeline.defaultSettings loop
+  where
+    loop :: Haskeline.InputT IO ()
+    loop =
+      Haskeline.getInputLine "" >>= \case
+        Nothing ->
+          pure ()
+
+        Just line -> do
+          liftIO (handleInput (Text.pack line))
+          loop
 
 -- | Handle one connected client's socket by forwarding all lines to the repl.
 -- Although the input is on a stream socket, I am assuming that I receive an
@@ -303,8 +283,6 @@ whenM mb mx = do
 --------------------------------------------------------------------------------
 -- Saner color API
 --------------------------------------------------------------------------------
-
--- vivid blue fg "foo"
 
 style :: [Console.SGR] -> String -> String
 style code s =
