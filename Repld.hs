@@ -8,11 +8,13 @@
 
 module Main where
 
+import RepldCommon
+
 import Control.Concurrent (forkIO)
 import Control.Concurrent.Async (Async, waitSTM, withAsync)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
-import Control.Exception.Safe (bracket, bracket_, catchAny, finally, throwIO)
+import Control.Exception.Safe (bracket_, catchAny, finally, throwIO)
 import Control.Monad (forever, guard, join, unless, when, void)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Managed (Managed, managed, runManaged)
@@ -26,7 +28,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Network.Socket
 import Network.Socket.ByteString (recv)
-import System.Directory (XdgDirectory(..), doesFileExist, getXdgDirectory, removeFile)
+import System.Directory (doesFileExist, removeFile)
 import System.Exit (ExitCode(ExitFailure), exitWith)
 import System.IO
 import System.Process.Typed
@@ -276,10 +278,6 @@ disableBuffering :: MonadIO m => Handle -> m ()
 disableBuffering h =
   liftIO (hSetBuffering h NoBuffering)
 
-getRepldSocketPath :: MonadIO m => m FilePath
-getRepldSocketPath =
-  liftIO (getXdgDirectory XdgData "repld.sock")
-
 -- | Run an IO action, ignoring synchronous exceptions
 ignoringExceptions :: IO () -> IO ()
 ignoringExceptions action =
@@ -292,13 +290,6 @@ managedAsync action =
 managedProcess :: ProcessConfig a b c -> Managed (Process a b c)
 managedProcess config =
   managed (withProcessWait config)
-
-managedUnixSocket :: Managed Socket
-managedUnixSocket =
-  managed
-    (bracket
-      (socket AF_UNIX Stream defaultProtocol)
-      close)
 
 managedUnixSocketServer :: FilePath -> Managed Socket
 managedUnixSocketServer path = do
