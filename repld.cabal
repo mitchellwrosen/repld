@@ -3,6 +3,20 @@ cabal-version: 2.4
 name: repld
 version: 0
 
+library
+  build-depends:
+    base,
+    directory,
+    managed,
+    network,
+    safe-exceptions,
+    typed-process >= 0.2.5,
+  default-language: Haskell2010
+  exposed-modules:
+    RepldCommon
+  ghc-options: -W
+  hs-source-dirs: src
+
 executable repld
   build-depends:
     ansi-terminal,
@@ -13,11 +27,25 @@ executable repld
     managed,
     network,
     optparse-applicative,
+    repld,
     safe-exceptions,
+    split,
     stm,
     terminal-size,
     text,
-    typed-process >= 0.2.5,
+    typed-process,
   default-language: Haskell2010
-  ghc-options: -Wall -O -threaded -with-rtsopts=-N
-  main-is: Main.hs
+  ghc-options: -Wall -fno-warn-name-shadowing -O -threaded -with-rtsopts=-N
+  main-is: Repld.hs
+
+executable repld-send
+  build-depends:
+    base,
+    bytestring,
+    managed,
+    network,
+    repld,
+    safe-exceptions,
+  default-language: Haskell2010
+  ghc-options: -Wall -O
+  main-is: RepldSend.hs

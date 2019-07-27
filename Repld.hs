@@ -1,4 +1,8 @@
-{-# LANGUAGE BlockArguments, LambdaCase, OverloadedStrings, ScopedTypeVariables #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ViewPatterns        #-}
 
 module Main where
 
@@ -11,12 +15,16 @@ import Control.Monad (forever, guard, join, unless, when, void)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Managed (Managed, managed, runManaged)
 import Data.ByteString (ByteString)
-import Data.Foldable (fold, for_)
+import Data.Char (isSpace)
+import Data.Foldable (asum, for_)
 import Data.Function ((&), fix)
+import Data.List (isPrefixOf)
+import Data.List.Split (splitOn)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
-import System.Directory (XdgDirectory(..), getXdgDirectory, removeFile)
+import System.Directory (XdgDirectory(..), doesFileExist, getXdgDirectory, removeFile)
 import System.Exit (ExitCode(ExitFailure), exitWith)
 import System.IO
 import System.Process.Typed
@@ -40,24 +48,11 @@ main =
   where
     parser :: Opt.Parser (IO ())
     parser =
-      Opt.hsubparser
-        (fold
-          [ Opt.command
-            "send"
-            (Opt.info
-              (pure sendMain)
-              (Opt.progDesc "Send"))
-
-          , Opt.command
-            "serve"
-            (Opt.info
-              (serveMain
-                <$> Opt.strArgument (Opt.metavar "COMMAND")
-                <*> Opt.switch
-                      (Opt.long "echo" <>
-                       Opt.help "Echo the input sent to the server"))
-              (Opt.progDesc "Serve COMMAND"))
-          ])
+      serveMain
+        <$> Opt.strArgument (Opt.metavar "COMMAND")
+        <*> Opt.switch
+              (Opt.long "no-echo" <>
+                Opt.help "Don't echo the input sent to the server")
 
 --------------------------------------------------------------------------------
 -- Send
@@ -81,12 +76,18 @@ sendMain =
 
     liftIO (sendAll sock bytes)
 
+-- ()
+
 --------------------------------------------------------------------------------
 -- Serve
 --------------------------------------------------------------------------------
 
+-- | Repls we recognize.
+data Repl
+  = Ghci
+
 serveMain :: String -> Bool -> IO ()
-serveMain replCommand echo =
+serveMain replCommand (not -> echo) =
   runManaged do
     disableBuffering stdout
     disableBuffering stderr
@@ -94,13 +95,64 @@ serveMain replCommand echo =
     socketPath :: FilePath <-
       getRepldSocketPath
 
+    liftIO do
+      whenM (doesFileExist socketPath) do
+        hPutStrLn stderr ("The repld socket " ++ socketPath ++ " already exists.")
+        hPutStrLn stderr "Perhaps repld is already running, or crashed?"
+        exitWith (ExitFailure 1)
+
     sock :: Socket <-
       managedUnixSocketServer socketPath
 
     replProcess :: Process Handle () () <-
       managedProcess replProcessConfig
 
-    doServeMain echo sock replProcess
+    let
+      replProcessStdin :: Handle
+      replProcessStdin =
+        getStdin replProcess
+
+    let
+      handleClientInput :: Text -> IO ()
+      handleClientInput (canonicalizeClientInput (parseRepl replCommand) -> input) = do
+        Console.setCursorPosition 0 0
+        Console.clearFromCursorToScreenEnd
+
+        width :: Maybe Int <-
+          fmap (\(Console.Window _ w) -> w) <$> Console.size
+
+        (putStrLn . style [vivid white bg, vivid black fg])
+          (case width of
+            Nothing ->
+              replCommand
+            Just width ->
+              replCommand ++ replicate (width - length replCommand) ' ')
+
+        when echo do
+          for_ input \line ->
+            Text.putStrLn (Text.pack (style [vivid blue fg] "≫ ") <> line)
+
+          for_ width \width ->
+            Text.putStrLn (Text.replicate width "─")
+
+        Text.hPutStr replProcessStdin (Text.unlines input)
+
+    let
+      handleLocalInput :: Text -> IO ()
+      handleLocalInput =
+        Text.hPutStrLn replProcessStdin
+
+    disableBuffering replProcessStdin
+
+    acceptAsync :: Async () <-
+      managedAsync (acceptThread (accept sock) handleClientInput)
+
+    stdinAsync :: Async () <-
+      managedAsync (stdinThread handleLocalInput)
+
+    (liftIO . atomically)
+      (waitEitherSTM_ acceptAsync stdinAsync <|>
+        void (waitExitCodeSTM replProcess))
 
     stopProcess replProcess
 
@@ -111,65 +163,55 @@ serveMain replCommand echo =
         & setDelegateCtlc True
         & setStdin createPipe
 
-doServeMain
-  :: Bool
-  -> Socket
-  -> Process Handle () ()
-  -> Managed ()
-doServeMain echo sock replProcess = do
-  disableBuffering replProcessStdin
+    parseRepl :: String -> Maybe Repl
+    parseRepl command =
+      asum
+        [ Ghci <$ guard ("cabal " `isPrefixOf` command)
+        , Ghci <$ guard ("ghci" == command)
+        , Ghci <$ guard ("ghci "  `isPrefixOf` command)
+        , Ghci <$ guard ("stack " `isPrefixOf` command)
+        ]
 
-  acceptAsync :: Async () <-
-    managedAsync (acceptThread (accept sock) handleClientInput)
 
-  stdinAsync :: Async () <-
-    managedAsync (stdinThread handleLocalInput)
+-- | Canonicalize client input by:
+--
+--   * Removing leading line-comment markers (so input can be sent from within
+--     a comment, and not ignored by the repl).
+--   * Removing leading whitespace (but retaining alignment)
+--   * Removing trailing whitespace
+canonicalizeClientInput :: Maybe Repl -> Text -> [Text]
+canonicalizeClientInput repl text = do
+  block :: [Text] <-
+    splitOn [""] (map uncomment (Text.lines text))
 
-  (liftIO . atomically)
-    (waitEitherSTM_ acceptAsync stdinAsync <|>
-      void (waitExitCodeSTM replProcess))
+  let
+    leadingWhitespace :: Int =
+      -- minimum is safe here (for now...) because if block is null, we don't
+      -- force this value
+      minimum (map (Text.length . Text.takeWhile isSpace) block)
+
+  let
+    strip :: Text -> Text =
+      Text.stripEnd . Text.drop leadingWhitespace
+
+  filter (not . Text.null) (map strip block)
 
   where
-    handleClientInput :: [Text] -> IO ()
-    handleClientInput input = do
-      Console.setCursorPosition 0 0
-      Console.clearFromCursorToScreenEnd
+    uncomment :: Text -> Text
+    uncomment =
+      case repl of
+        Nothing ->
+          id
 
-      when echo do
-        for_ input \line ->
-          Text.putStrLn
-            (fold
-              [ Text.pack
-                  (Console.setSGRCode
-                    [Console.SetColor
-                      Console.Foreground
-                      Console.Vivid
-                      Console.Blue])
-              , "≫ "
-              , Text.pack (Console.setSGRCode [Console.Reset])
-              , line
-              ])
+        Just Ghci ->
+          \s -> fromMaybe s (Text.stripPrefix "-- " s)
 
-        Console.size >>= \case
-          Just (Console.Window _ width) ->
-            Text.putStrLn (Text.replicate width "─")
-          _ ->
-            pure ()
 
-      Text.hPutStr replProcessStdin (Text.unlines input)
-
-    handleLocalInput :: Text -> IO ()
-    handleLocalInput =
-      Text.hPutStrLn replProcessStdin
-
-    replProcessStdin :: Handle
-    replProcessStdin =
-      getStdin replProcess
 
 -- | Accept clients forever.
 acceptThread
   :: IO (Socket, SockAddr)
-  -> ([Text] -> IO ())
+  -> (Text -> IO ())
   -> IO ()
 acceptThread acceptClient handleInput =
   forever do
@@ -192,7 +234,7 @@ stdinThread handleInput =
 -- entire "request" in one 8K read.
 clientThread
   :: Socket
-  -> ([Text] -> IO ())
+  -> (Text -> IO ())
   -> IO ()
 clientThread sock handleInput =
   fix \loop -> do
@@ -202,15 +244,8 @@ clientThread sock handleInput =
     unless (ByteString.null bytes) do
       text :: Text <-
         either throwIO pure (Text.decodeUtf8' bytes)
-      handleInput (canonicalize text)
+      handleInput text
       loop
-
-  where
-    canonicalize :: Text -> [Text]
-    canonicalize text = do
-      line <- Text.strip <$> Text.lines text
-      guard (not (Text.null line))
-      pure line
 
 
 --------------------------------------------------------------------------------
@@ -258,3 +293,46 @@ managedUnixSocketServer path = do
         (do
           listen sock 5
           k sock))
+
+whenM :: Monad m => m Bool -> m () -> m ()
+whenM mb mx = do
+  b <- mb
+  when b mx
+
+
+--------------------------------------------------------------------------------
+-- Saner color API
+--------------------------------------------------------------------------------
+
+-- vivid blue fg "foo"
+
+style :: [Console.SGR] -> String -> String
+style code s =
+  Console.setSGRCode code ++ s ++ Console.setSGRCode [Console.Reset]
+
+vivid
+  :: Console.Color
+  -> Console.ConsoleLayer
+  -> Console.SGR
+vivid color layer =
+  Console.SetColor layer Console.Vivid color
+
+black :: Console.Color
+black =
+  Console.Black
+
+blue :: Console.Color
+blue =
+  Console.Blue
+
+white :: Console.Color
+white =
+  Console.White
+
+bg :: Console.ConsoleLayer
+bg =
+  Console.Background
+
+fg :: Console.ConsoleLayer
+fg =
+  Console.Foreground

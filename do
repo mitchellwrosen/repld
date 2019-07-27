@@ -2,17 +2,18 @@
 
 case "$1" in
   "dev")
-    exec ghcid -c "cabal v2-repl -O0" --restart repld.cabal
+    exec ghcid -c "cabal v2-repl -O0 exe:repld" --restart repld.cabal
     ;;
 
   "install")
     set -e
     cabal -v0 v2-build
     cp $(cabal-plan list-bin repld) ~/.local/bin
+    cp $(cabal-plan list-bin repld-send) ~/.local/bin
     ;;
 
   "repl")
-    cabal v2-repl -O0
+    cabal v2-repl -O0 -O exe:repld
     ;;
 
   "run")
