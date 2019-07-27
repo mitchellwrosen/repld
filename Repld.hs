@@ -1,16 +1,18 @@
 {-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE DerivingStrategies  #-}
 {-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NumericUnderscores  #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ViewPatterns        #-}
 
 module Main where
 
-import Control.Applicative ((<|>))
 import Control.Concurrent (forkIO)
-import Control.Concurrent.Async (Async, waitEitherSTM_, withAsync)
-import Control.Concurrent.STM (atomically)
-import Control.Exception.Safe (bracket, bracket_, catchAny, throwIO)
+import Control.Concurrent.Async (Async, waitSTM, withAsync)
+import Control.Concurrent.MVar
+import Control.Concurrent.STM
+import Control.Exception.Safe (bracket, bracket_, catchAny, finally, throwIO)
 import Control.Monad (forever, guard, join, unless, when, void)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Managed (Managed, managed, runManaged)
@@ -28,6 +30,7 @@ import System.Directory (XdgDirectory(..), doesFileExist, getXdgDirectory, remov
 import System.Exit (ExitCode(ExitFailure), exitWith)
 import System.IO
 import System.Process.Typed
+import System.Timeout (timeout)
 
 import qualified Data.ByteString as ByteString
 import qualified Data.Text as Text
@@ -37,7 +40,6 @@ import qualified Options.Applicative as Opt
 import qualified System.Console.ANSI as Console
 import qualified System.Console.Haskeline as Haskeline
 import qualified System.Console.Terminal.Size as Console
-
 
 -- | Repls we recognize.
 data Repl
@@ -77,7 +79,7 @@ serveMain replCommand (not -> echo) =
     sock :: Socket <-
       managedUnixSocketServer socketPath
 
-    repl :: Process Handle () () <-
+    repl :: Process Handle Handle () <-
       managedProcess (replProcessConfig replCommand)
 
     let
@@ -117,15 +119,31 @@ serveMain replCommand (not -> echo) =
 
     disableBuffering replStdin
 
+    doneInitializingVar :: MVar () <-
+      liftIO newEmptyMVar
+
     acceptAsync :: Async () <-
       managedAsync (acceptThread (accept sock) handleClientInput)
 
     stdinAsync :: Async () <-
       managedAsync (stdinThread handleLocalInput)
 
-    (liftIO . atomically)
-      (waitEitherSTM_ acceptAsync stdinAsync <|>
-        void (waitExitCodeSTM repl))
+    replStdoutAsync :: Async () <-
+      managedAsync
+        (replStdoutThread
+          (putMVar doneInitializingVar ())
+          (getStdout repl))
+
+    -- Fake client input to clear the screen and such
+    liftIO (takeMVar doneInitializingVar)
+    liftIO (handleClientInput "")
+
+    (liftIO . ignoringExceptions . atomically . asum)
+      [ waitSTM acceptAsync
+      , waitSTM stdinAsync
+      , waitSTM replStdoutAsync
+      , void (waitExitCodeSTM repl)
+      ]
 
     stopProcess repl
 
@@ -139,11 +157,12 @@ serveMain replCommand (not -> echo) =
         , Ghci <$ guard ("stack " `isPrefixOf` command)
         ]
 
-replProcessConfig :: String -> ProcessConfig Handle () ()
+replProcessConfig :: String -> ProcessConfig Handle Handle ()
 replProcessConfig command =
   shell command
     & setDelegateCtlc True
     & setStdin createPipe
+    & setStdout createPipe
 
 -- | Canonicalize client input by:
 --
@@ -191,24 +210,6 @@ acceptThread acceptClient handleInput =
     -- Ephemeral background thread for each client - don't care if/how it dies.
     void (forkIO (clientThread clientSock handleInput))
 
--- | Forward stdin to this process onto the repl. This makes the foregrounded
--- repld server interactive.
-stdinThread
-  :: (Text -> IO ())
-  -> IO ()
-stdinThread handleInput =
-  Haskeline.runInputT Haskeline.defaultSettings loop
-  where
-    loop :: Haskeline.InputT IO ()
-    loop =
-      Haskeline.getInputLine "" >>= \case
-        Nothing ->
-          pure ()
-
-        Just line -> do
-          liftIO (handleInput (Text.pack line))
-          loop
-
 -- | Handle one connected client's socket by forwarding all lines to the repl.
 -- Although the input is on a stream socket, I am assuming that I receive an
 -- entire "request" in one 8K read.
@@ -227,6 +228,45 @@ clientThread sock handleInput =
       handleInput text
       loop
 
+-- | Forward stdin to this process onto the repl. This makes the foregrounded
+-- repld server interactive.
+stdinThread
+  :: (Text -> IO ())
+  -> IO ()
+stdinThread handleInput =
+  Haskeline.runInputT Haskeline.defaultSettings loop
+
+  where
+    loop :: Haskeline.InputT IO ()
+    loop = do
+      Haskeline.getInputLine "" >>= \case
+        Nothing ->
+          pure ()
+
+        Just line -> do
+          liftIO (handleInput (Text.pack line))
+          loop
+
+replStdoutThread
+  :: IO ()
+  -> Handle
+  -> IO ()
+replStdoutThread doneInitializing replStdout = do
+  disableBuffering replStdout
+
+  -- In the "initialization phase", expect some output every 1s
+  initializationPhase `finally` doneInitializing
+
+  -- Then, notify that we've initialized, and proceed to forward all repl stdout
+  -- to the terminal.
+  forever (Text.hGetChunk replStdout >>= Text.putStr)
+
+  where
+    initializationPhase :: IO ()
+    initializationPhase =
+      whileM
+        (timeout 1_000_000 (Text.hGetChunk replStdout))
+        Text.putStr
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -278,6 +318,17 @@ whenM :: Monad m => m Bool -> m () -> m ()
 whenM mb mx = do
   b <- mb
   when b mx
+
+whenJustM :: Monad m => m (Maybe a) -> (a -> m ()) -> m ()
+whenJustM mx f =
+  mx >>= \case
+    Nothing -> pure ()
+    Just x -> f x
+
+whileM :: Monad m => m (Maybe a) -> (a -> m ()) -> m ()
+whileM mx f =
+  fix \loop ->
+    whenJustM mx (\x -> f x >> loop)
 
 
 --------------------------------------------------------------------------------
