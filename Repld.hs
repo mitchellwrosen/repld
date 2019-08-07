@@ -15,7 +15,7 @@ import Control.Concurrent.Async (Async, waitSTM, withAsync)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception.Safe (bracket_, catchAny, finally, throwIO)
-import Control.Monad (forever, guard, join, unless, when, void)
+import Control.Monad (forever, guard, unless, when, void)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Managed (Managed, managed, runManaged)
 import Data.ByteString (ByteString)
@@ -48,116 +48,125 @@ data Repl
   = Ghci
 
 main :: IO ()
-main =
-  join
+main = do
+  program :: Managed () <-
     (Opt.customExecParser
       (Opt.prefs (Opt.showHelpOnError <> Opt.showHelpOnEmpty))
-      (Opt.info (Opt.helper <*> parser) (Opt.progDesc "repld")))
+      (Opt.info (Opt.helper <*> mainParser) (Opt.progDesc "repld")))
 
-  where
-    parser :: Opt.Parser (IO ())
-    parser =
-      serveMain
-        <$> Opt.strArgument (Opt.metavar "COMMAND")
-        <*> Opt.switch
-              (Opt.long "no-echo" <>
-                Opt.help "Don't echo the input sent to the server")
+  runManaged program
 
-serveMain :: String -> Bool -> IO ()
-serveMain replCommand (not -> echo) =
-  runManaged do
-    disableBuffering stdout
-    disableBuffering stderr
+mainParser :: Opt.Parser (Managed ())
+mainParser =
+  theMain
+    <$> Opt.strArgument (Opt.metavar "COMMAND")
+    <*> Opt.switch
+          (Opt.long "no-echo" <>
+            Opt.help "Don't echo the input sent to the server")
 
-    socketPath :: FilePath <-
-      getRepldSocketPath
+theMain
+  :: String -- ^ Shell command to run (should be a repl)
+  -> Bool -- ^ Don't echo input sent?
+  -> Managed ()
+theMain replCommand (not -> echo) = do
+  disableBuffering stdout
+  disableBuffering stderr
 
-    liftIO do
-      whenM (doesFileExist socketPath) do
-        hPutStrLn stderr ("The repld socket " ++ socketPath ++ " already exists.")
-        hPutStrLn stderr "Perhaps repld is already running, or crashed?"
-        exitWith (ExitFailure 1)
+  sock :: Socket <-
+    bindRepldSocket
 
-    sock :: Socket <-
-      managedUnixSocketServer socketPath
+  repl :: RunningRepl <-
+    spawnRepl replCommand
 
-    repl :: Process Handle Handle () <-
-      managedProcess (replProcessConfig replCommand)
+  doneInitializingVar :: MVar () <-
+    liftIO newEmptyMVar
 
-    let
-      replStdin :: Handle
-      replStdin =
-        getStdin repl
+  acceptAsync :: Async () <-
+    managedAsync
+      (acceptThread
+        sock
+        (handleClientInput replCommand echo repl))
 
-    let
-      handleClientInput :: Text -> IO ()
-      handleClientInput (canonicalizeClientInput (parseRepl replCommand) -> input) = do
-        Console.setCursorPosition 0 0
-        Console.clearFromCursorToScreenEnd
+  stdinAsync :: Async () <-
+    managedAsync (stdinThread repl)
 
-        width :: Maybe Int <-
-          fmap (\(Console.Window _ w) -> w) <$> Console.size
+  replStdoutAsync :: Async () <-
+    managedAsync
+      (replStdoutThread
+        (putMVar doneInitializingVar ())
+        repl)
 
-        (putStrLn . style [vivid white bg, vivid black fg])
-          (case width of
-            Nothing ->
-              replCommand
-            Just width ->
-              replCommand ++ replicate (width - length replCommand) ' ')
+  -- Fake client input to clear the screen and such
+  liftIO (takeMVar doneInitializingVar)
+  liftIO (handleClientInput replCommand echo repl "")
 
-        when echo do
-          for_ input \line ->
-            Text.putStrLn (Text.pack (style [vivid blue fg] "≫ ") <> line)
+  (liftIO . ignoringExceptions . atomically . asum)
+    [ waitSTM acceptAsync
+    , waitSTM stdinAsync
+    , waitSTM replStdoutAsync
+    , void (waitForReplToExit repl)
+    ]
 
-          for_ width \width ->
-            Text.putStrLn (Text.replicate width "─")
+  killRepl repl
 
-        Text.hPutStr replStdin (Text.unlines input)
+-- | Crudely try to figure out what repl is being spawned. Totally inaccurate as
+-- it cannot see thru aliases/scripts. TODO add a flag that tells repld what
+-- repl is being spawned.
+parseRepl :: String -> Maybe Repl
+parseRepl command =
+  asum
+    [ Ghci <$ guard ("cabal " `isPrefixOf` command)
+    , Ghci <$ guard ("ghci" == command)
+    , Ghci <$ guard ("ghci "  `isPrefixOf` command)
+    , Ghci <$ guard ("stack " `isPrefixOf` command)
+    ]
 
-    let
-      handleLocalInput :: Text -> IO ()
-      handleLocalInput =
-        Text.hPutStrLn replStdin
+bindRepldSocket :: Managed Socket
+bindRepldSocket = do
+  socketPath :: FilePath <-
+    getRepldSocketPath
 
-    disableBuffering replStdin
+  liftIO do
+    whenM (doesFileExist socketPath) do
+      hPutStrLn stderr ("The repld socket " ++ socketPath ++ " already exists.")
+      hPutStrLn stderr "Perhaps repld is already running, or crashed?"
+      exitWith (ExitFailure 1)
 
-    doneInitializingVar :: MVar () <-
-      liftIO newEmptyMVar
+  managedUnixSocketServer socketPath
 
-    acceptAsync :: Async () <-
-      managedAsync (acceptThread (accept sock) handleClientInput)
+handleClientInput
+  :: String
+  -> Bool
+  -> RunningRepl
+  -> Text
+  -> IO ()
+handleClientInput
+    replCommand
+    echo
+    repl
+    (canonicalizeClientInput (parseRepl replCommand) -> input) = do
 
-    stdinAsync :: Async () <-
-      managedAsync (stdinThread handleLocalInput)
+  Console.setCursorPosition 0 0
+  Console.clearFromCursorToScreenEnd
 
-    replStdoutAsync :: Async () <-
-      managedAsync
-        (replStdoutThread
-          (putMVar doneInitializingVar ())
-          (getStdout repl))
+  width :: Maybe Int <-
+    fmap (\(Console.Window _ w) -> w) <$> Console.size
 
-    -- Fake client input to clear the screen and such
-    liftIO (takeMVar doneInitializingVar)
-    liftIO (handleClientInput "")
+  (putStrLn . style [vivid white bg, vivid black fg])
+    (case width of
+      Nothing ->
+        replCommand
+      Just width ->
+        replCommand ++ replicate (width - length replCommand) ' ')
 
-    (liftIO . ignoringExceptions . atomically . asum)
-      [ waitSTM acceptAsync
-      , waitSTM stdinAsync
-      , waitSTM replStdoutAsync
-      , void (waitExitCodeSTM repl)
-      ]
+  when echo do
+    for_ input \line ->
+      Text.putStrLn (Text.pack (style [vivid blue fg] "≫ ") <> line)
 
-    stopProcess repl
+    for_ width \width ->
+      Text.putStrLn (Text.replicate width "─")
 
-  where
-    parseRepl :: String -> Maybe Repl
-    parseRepl command =
-      asum
-        [ Ghci <$ guard ("cabal " `isPrefixOf` command)
-        , Ghci <$ guard ("ghci" == command)
-        , Ghci <$ guard ("ghci "  `isPrefixOf` command)
-        , Ghci <$ guard ("stack " `isPrefixOf` command)
-        ]
+  writeRepl repl (Text.unlines input)
 
 replProcessConfig :: String -> ProcessConfig Handle Handle ()
 replProcessConfig command =
@@ -201,13 +210,13 @@ canonicalizeClientInput repl text = do
 
 -- | Accept clients forever.
 acceptThread
-  :: IO (Socket, SockAddr)
+  :: Socket
   -> (Text -> IO ())
   -> IO ()
-acceptThread acceptClient handleInput =
+acceptThread sock handleInput =
   forever do
     (clientSock, _clientSockAddr) <-
-      acceptClient
+      accept sock
 
     -- Ephemeral background thread for each client - don't care if/how it dies.
     void (forkIO (clientThread clientSock handleInput))
@@ -233,9 +242,9 @@ clientThread sock handleInput =
 -- | Forward stdin to this process onto the repl. This makes the foregrounded
 -- repld server interactive.
 stdinThread
-  :: (Text -> IO ())
+  :: RunningRepl
   -> IO ()
-stdinThread handleInput =
+stdinThread repl =
   Haskeline.runInputT Haskeline.defaultSettings loop
 
   where
@@ -246,29 +255,90 @@ stdinThread handleInput =
           pure ()
 
         Just line -> do
-          liftIO (handleInput (Text.pack line))
+          liftIO (writelnRepl repl (Text.pack line))
           loop
 
 replStdoutThread
   :: IO ()
-  -> Handle
+  -> RunningRepl
   -> IO ()
-replStdoutThread doneInitializing replStdout = do
-  disableBuffering replStdout
-
+replStdoutThread doneInitializing repl = do
   -- In the "initialization phase", expect some output every 1s
   initializationPhase `finally` doneInitializing
 
   -- Then, notify that we've initialized, and proceed to forward all repl stdout
   -- to the terminal.
-  forever (Text.hGetChunk replStdout >>= Text.putStr)
+  forever (readRepl repl >>= Text.putStr)
 
   where
     initializationPhase :: IO ()
     initializationPhase =
       whileM
-        (timeout 1_000_000 (Text.hGetChunk replStdout))
+        (timeout 1_000_000 (readRepl repl))
         Text.putStr
+
+
+--------------------------------------------------------------------------------
+-- Running repl
+-------------------------------------------------------------------------------
+
+data RunningRepl
+  = RunningRepl
+  { runningReplCommand :: String
+  , runningReplProcess :: Process Handle Handle ()
+  }
+
+spawnRepl
+  :: String
+  -> Managed RunningRepl
+spawnRepl command = do
+  process <- managedProcess config
+  disableBuffering (getStdin process)
+  disableBuffering (getStdout process)
+  pure RunningRepl
+    { runningReplCommand = command
+    , runningReplProcess = process
+    }
+  where
+    config :: ProcessConfig Handle Handle ()
+    config =
+      shell command
+        & setDelegateCtlc True
+        & setStdin createPipe
+        & setStdout createPipe
+
+readRepl
+  :: RunningRepl
+  -> IO Text
+readRepl repl =
+  (Text.hGetChunk . getStdout . runningReplProcess) repl
+
+writeRepl
+  :: RunningRepl
+  -> Text
+  -> IO ()
+writeRepl repl line =
+  (Text.hPutStr . getStdin . runningReplProcess) repl line
+
+writelnRepl
+  :: RunningRepl
+  -> Text
+  -> IO ()
+writelnRepl repl line =
+  (Text.hPutStrLn . getStdin . runningReplProcess) repl line
+
+waitForReplToExit
+  :: RunningRepl
+  -> STM ExitCode
+waitForReplToExit =
+  waitExitCodeSTM . runningReplProcess
+
+killRepl
+  :: MonadIO m
+  => RunningRepl
+  -> m ()
+killRepl =
+  stopProcess . runningReplProcess
 
 --------------------------------------------------------------------------------
 -- Helpers
