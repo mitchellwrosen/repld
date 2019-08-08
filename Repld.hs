@@ -15,7 +15,7 @@ import Control.Concurrent.Async (Async, waitSTM, withAsync)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception.Safe (bracket_, catchAny, finally, throwIO)
-import Control.Monad (forever, guard, unless, when, void)
+import Control.Monad (forever, guard, unless, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Managed (Managed, managed, runManaged)
 import Data.ByteString (ByteString)
@@ -29,7 +29,7 @@ import Data.Text (Text)
 import Network.Socket
 import Network.Socket.ByteString (recv)
 import System.Directory (doesFileExist, removeFile)
-import System.Exit (ExitCode(ExitFailure), exitWith)
+import System.Exit (ExitCode (ExitFailure), exitWith)
 import System.IO
 import System.Process.Typed
 import System.Timeout (timeout)
@@ -42,10 +42,6 @@ import qualified Options.Applicative as Opt
 import qualified System.Console.ANSI as Console
 import qualified System.Console.Haskeline as Haskeline
 import qualified System.Console.Terminal.Size as Console
-
--- | Repls we recognize.
-data Repl
-  = Ghci
 
 main :: IO ()
 main = do
@@ -85,7 +81,7 @@ theMain replCommand (not -> echo) = do
     managedAsync
       (acceptThread
         sock
-        (handleClientInput replCommand echo repl))
+        (handleClientInput echo repl))
 
   stdinAsync :: Async () <-
     managedAsync (stdinThread repl)
@@ -98,7 +94,7 @@ theMain replCommand (not -> echo) = do
 
   -- Fake client input to clear the screen and such
   liftIO (takeMVar doneInitializingVar)
-  liftIO (handleClientInput replCommand echo repl "")
+  liftIO (handleClientInput echo repl "")
 
   (liftIO . ignoringExceptions . atomically . asum)
     [ waitSTM acceptAsync
@@ -108,18 +104,6 @@ theMain replCommand (not -> echo) = do
     ]
 
   killRepl repl
-
--- | Crudely try to figure out what repl is being spawned. Totally inaccurate as
--- it cannot see thru aliases/scripts. TODO add a flag that tells repld what
--- repl is being spawned.
-parseRepl :: String -> Maybe Repl
-parseRepl command =
-  asum
-    [ Ghci <$ guard ("cabal " `isPrefixOf` command)
-    , Ghci <$ guard ("ghci" == command)
-    , Ghci <$ guard ("ghci "  `isPrefixOf` command)
-    , Ghci <$ guard ("stack " `isPrefixOf` command)
-    ]
 
 bindRepldSocket :: Managed Socket
 bindRepldSocket = do
@@ -135,56 +119,50 @@ bindRepldSocket = do
   managedUnixSocketServer socketPath
 
 handleClientInput
-  :: String
-  -> Bool
-  -> RunningRepl
-  -> Text
+  :: Bool -- ^ Echo client input?
+  -> RunningRepl -- ^ Running repl
+  -> Text -- ^ Client input
   -> IO ()
-handleClientInput
-    replCommand
-    echo
-    repl
-    (canonicalizeClientInput (parseRepl replCommand) -> input) = do
-
-  Console.setCursorPosition 0 0
-  Console.clearFromCursorToScreenEnd
-
-  width :: Maybe Int <-
-    fmap (\(Console.Window _ w) -> w) <$> Console.size
-
-  (putStrLn . style [vivid white bg, vivid black fg])
-    (case width of
-      Nothing ->
-        replCommand
-      Just width ->
-        replCommand ++ replicate (width - length replCommand) ' ')
-
-  when echo do
-    for_ input \line ->
-      Text.putStrLn (Text.pack (style [vivid blue fg] "≫ ") <> line)
-
-    for_ width \width ->
-      Text.putStrLn (Text.replicate width "─")
-
+handleClientInput echo repl (canonicalizeClientInput -> input) = do
+  clearTerminal
+  width <- getConsoleWidth
+  putReplCommand width
+  putClientInput width
   writeRepl repl (Text.unlines input)
 
-replProcessConfig :: String -> ProcessConfig Handle Handle ()
-replProcessConfig command =
-  shell command
-    & setDelegateCtlc True
-    & setStdin createPipe
-    & setStdout createPipe
+  where
+    clearTerminal :: IO ()
+    clearTerminal = do
+      Console.setCursorPosition 0 0
+      Console.clearFromCursorToScreenEnd
+
+    getConsoleWidth :: IO Int
+    getConsoleWidth =
+      Console.size >>= \case
+        Nothing -> throwIO (userError "Failed to get console width")
+        Just (Console.Window _ w) -> pure w
+
+    putReplCommand :: Int -> IO ()
+    putReplCommand width =
+      (putStrLn . style [vivid white bg, vivid black fg])
+        (runningReplCommand repl ++
+          replicate (width - length (runningReplCommand repl)) ' ')
+
+    putClientInput :: Int -> IO ()
+    putClientInput width =
+      when echo do
+        for_ input \line ->
+          Text.putStrLn (Text.pack (style [vivid blue fg] "≫ ") <> line)
+        Text.putStrLn (Text.replicate width "─")
 
 -- | Canonicalize client input by:
 --
---   * Removing leading line-comment markers (so input can be sent from within
---     a comment, and not ignored by the repl).
 --   * Removing leading whitespace (but retaining alignment)
 --   * Removing trailing whitespace
-canonicalizeClientInput :: Maybe Repl -> Text -> [Text]
-canonicalizeClientInput repl text = do
+canonicalizeClientInput :: Text -> [Text]
+canonicalizeClientInput text = do
   block :: [Text] <-
-    splitOn [""] (map uncomment (Text.lines text))
+    splitOn [""] (Text.lines text)
 
   let
     leadingWhitespace :: Int =
@@ -197,16 +175,6 @@ canonicalizeClientInput repl text = do
       Text.stripEnd . Text.drop leadingWhitespace
 
   filter (not . Text.null) (map strip block)
-
-  where
-    uncomment :: Text -> Text
-    uncomment =
-      case repl of
-        Nothing ->
-          id
-
-        Just Ghci ->
-          \s -> fromMaybe s (Text.stripPrefix "-- " s)
 
 -- | Accept clients forever.
 acceptThread
@@ -282,9 +250,37 @@ replStdoutThread doneInitializing repl = do
 -- Running repl
 -------------------------------------------------------------------------------
 
+-- | Repls we recognize.
+data ReplType
+  = Ghci
+  | UnknownRepl
+
+stripLineComment
+  :: ReplType
+  -> Text
+  -> Text
+stripLineComment = \case
+  Ghci -> \s -> fromMaybe s (Text.stripPrefix "-- " s)
+  UnknownRepl -> id
+
+-- | Crudely try to figure out what repl is being spawned. Totally inaccurate as
+-- it cannot see thru aliases/scripts. TODO add a flag that tells repld what
+-- repl is being spawned.
+parseReplType :: String -> ReplType
+parseReplType command =
+  fromMaybe UnknownRepl
+    (asum
+      [ Ghci <$ guard ("cabal " `isPrefixOf` command)
+      , Ghci <$ guard ("ghci" == command)
+      , Ghci <$ guard ("ghci "  `isPrefixOf` command)
+      , Ghci <$ guard ("stack " `isPrefixOf` command)
+      ])
+
+
 data RunningRepl
   = RunningRepl
   { runningReplCommand :: String
+  , runningReplType :: ReplType
   , runningReplProcess :: Process Handle Handle ()
   }
 
@@ -297,6 +293,7 @@ spawnRepl command = do
   disableBuffering (getStdout process)
   pure RunningRepl
     { runningReplCommand = command
+    , runningReplType = parseReplType command
     , runningReplProcess = process
     }
   where
@@ -310,22 +307,36 @@ spawnRepl command = do
 readRepl
   :: RunningRepl
   -> IO Text
-readRepl repl =
-  (Text.hGetChunk . getStdout . runningReplProcess) repl
+readRepl =
+  Text.hGetChunk . getStdout . runningReplProcess
 
 writeRepl
   :: RunningRepl
   -> Text
   -> IO ()
-writeRepl repl line =
-  (Text.hPutStr . getStdin . runningReplProcess) repl line
+writeRepl repl =
+  writeReplRaw repl . stripLineComment (runningReplType repl)
+
+writeReplRaw
+  :: RunningRepl
+  -> Text
+  -> IO ()
+writeReplRaw =
+  Text.hPutStr . getStdin . runningReplProcess
 
 writelnRepl
   :: RunningRepl
   -> Text
   -> IO ()
-writelnRepl repl line =
-  (Text.hPutStrLn . getStdin . runningReplProcess) repl line
+writelnRepl repl =
+  writeReplRaw repl . stripLineComment (runningReplType repl)
+
+writelnReplRaw
+  :: RunningRepl
+  -> Text
+  -> IO ()
+writelnReplRaw =
+  Text.hPutStrLn . getStdin . runningReplProcess
 
 waitForReplToExit
   :: RunningRepl
