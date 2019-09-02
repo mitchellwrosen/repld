@@ -329,7 +329,7 @@ writelnRepl
   -> Text
   -> IO ()
 writelnRepl repl =
-  writeReplRaw repl . stripLineComment (runningReplType repl)
+  writelnReplRaw repl . stripLineComment (runningReplType repl)
 
 writelnReplRaw
   :: RunningRepl
