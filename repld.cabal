@@ -5,7 +5,7 @@ version: 0
 
 library
   build-depends:
-    base ^>= 4.12,
+    base ^>= 4.12 || ^>= 4.13 || ^>= 4.14,
     directory,
     filepath,
     managed,
