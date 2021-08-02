@@ -32,11 +32,11 @@ executable repld
   import: component
   build-depends:
     ansi-terminal,
-    async,
     base,
     bytestring,
     directory,
     haskeline,
+    ki ^>= 0.2,
     network,
     optparse-applicative,
     repld,

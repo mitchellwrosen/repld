@@ -1,7 +1,6 @@
 module Main where
 
 import Control.Concurrent (forkIO)
-import Control.Concurrent.Async (waitSTM, withAsync)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception.Safe (bracket_, catchAny, finally, throwIO)
@@ -9,13 +8,14 @@ import Control.Monad (forever, join, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as ByteString
 import Data.Char (isSpace)
-import Data.Foldable (asum, for_)
+import Data.Foldable (for_)
 import Data.Function (fix, (&))
 import Data.List.Split (splitOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
+import qualified Ki
 import Network.Socket
 import Network.Socket.ByteString (recv)
 import qualified Options.Applicative as Opt
@@ -56,21 +56,15 @@ theMain replCommand (not -> echo) = do
     withRepl replCommand \repl -> do
       doneInitializingVar <- newEmptyMVar
 
-      withAsync (acceptThread sock (handleClientInput echo repl)) \acceptAsync ->
-        withAsync (stdinThread repl) \stdinAsync ->
-          withAsync (replStdoutThread (putMVar doneInitializingVar ()) repl) \replStdoutAsync -> do
-            -- Fake client input to clear the screen and such
-            takeMVar doneInitializingVar
-            handleClientInput echo repl ""
-
-            (ignoringExceptions . atomically . asum)
-              [ waitSTM acceptAsync,
-                waitSTM stdinAsync,
-                waitSTM replStdoutAsync,
-                void (waitForReplToExit repl)
-              ]
-
-            killRepl repl
+      Ki.scoped \scope -> do
+        Ki.fork_ scope (acceptThread sock (handleClientInput echo repl))
+        Ki.fork_ scope (stdinThread repl)
+        Ki.fork_ scope (replStdoutThread (putMVar doneInitializingVar ()) repl)
+        -- Fake client input to clear the screen and such
+        takeMVar doneInitializingVar
+        handleClientInput echo repl ""
+        exitCode <- atomically (waitForReplToExit repl)
+        exitWith exitCode
   where
     withRepldSocket :: (Socket -> IO a) -> IO a
     withRepldSocket action = do
