@@ -1,0 +1,10 @@
+cradle:
+  cabal:
+    - path: "./src"
+      component: "lib:repld"
+
+    - path: "././Repld.hs"
+      component: "repld:exe:repld"
+
+    - path: "././RepldSend.hs"
+      component: "repld:exe:repld-send"
