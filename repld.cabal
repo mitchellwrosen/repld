@@ -20,42 +20,34 @@ common component
 library
   import: component
   build-depends:
-    directory,
-    filepath,
-    network,
-    safe-exceptions,
-    typed-process ^>= 0.2.5,
-  exposed-modules:
-    RepldCommon
-  hs-source-dirs: src
-
-executable repld
-  import: component
-  build-depends:
     ansi-terminal,
     bytestring,
     directory,
+    filepath,
     haskeline,
     ki ^>= 0.2,
     network,
-    repld,
     safe-exceptions,
     split,
     stm,
     terminal-size,
     text,
-    typed-process,
+    typed-process ^>= 0.2.5,
+  exposed-modules:
+    Repld.Main
+    RepldCommon
+  hs-source-dirs: src
+
+executable repld
+  import: component
+  build-depends: repld
   ghc-options: -O -threaded -with-rtsopts=-N
   hs-source-dirs: app/repld
   main-is: Main.hs
 
 executable repld-send
   import: component
-  build-depends:
-    bytestring,
-    network,
-    repld,
-    safe-exceptions,
+  build-depends: repld
   ghc-options: -O
   hs-source-dirs: app/repld-send
   main-is: Main.hs
