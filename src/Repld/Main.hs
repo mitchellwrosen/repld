@@ -61,6 +61,7 @@ repld = do
                   liftIO (writelnRepl repl (Text.pack line))
                   loop
           Haskeline.runInputT Haskeline.defaultSettings loop
+          hClose (getStdin (runningReplProcess repl))
         -- Forward repl's stdout to our stdout.
         Ki.fork_ scope (forever (readRepl repl >>= Text.putStr))
         exitCode <- atomically (waitForReplToExit repl)
