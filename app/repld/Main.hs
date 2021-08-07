@@ -3,11 +3,10 @@ module Main where
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
 import Control.Exception.Safe (bracket_, catchAny, throwIO)
-import Control.Monad (forever, join, unless, void, when)
+import Control.Monad (forever, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as ByteString
 import Data.Char (isSpace)
-import Data.Foldable (for_)
 import Data.Function (fix, (&))
 import Data.List.Split (splitOn)
 import Data.Text (Text)
@@ -17,36 +16,24 @@ import qualified Data.Text.IO as Text
 import qualified Ki
 import Network.Socket
 import Network.Socket.ByteString (recv)
-import qualified Options.Applicative as Opt
 import RepldCommon
 import qualified System.Console.ANSI as Console
 import qualified System.Console.Haskeline as Haskeline
 import qualified System.Console.Terminal.Size as Console
 import System.Directory (doesFileExist, removeFile)
-import System.Exit (ExitCode (ExitFailure), exitWith)
+import System.Environment (getArgs)
+import System.Exit (ExitCode (ExitFailure), exitFailure, exitWith)
 import System.IO
 import System.Process.Typed
 
 main :: IO ()
 main =
-  join do
-    Opt.customExecParser
-      (Opt.prefs (Opt.showHelpOnError <> Opt.showHelpOnEmpty))
-      (Opt.info (Opt.helper <*> mainParser) (Opt.progDesc "repld"))
-  where
-    mainParser :: Opt.Parser (IO ())
-    mainParser =
-      theMain
-        <$> Opt.strArgument (Opt.metavar "COMMAND")
-        <*> Opt.switch (Opt.long "no-echo" <> Opt.help "Don't echo the input sent to the server")
+  getArgs >>= \case
+    [command] -> theMain command
+    _ -> exitFailure
 
-theMain ::
-  -- | Shell command to run (should be a repl)
-  String ->
-  -- | Don't echo input sent?
-  Bool ->
-  IO ()
-theMain replCommand (not -> echo) = do
+theMain :: String -> IO ()
+theMain replCommand = do
   disableBuffering stdout
   disableBuffering stderr
 
@@ -65,7 +52,7 @@ theMain replCommand (not -> echo) = do
                 bytes <- recv client 8192
                 unless (ByteString.null bytes) do
                   text <- either throwIO pure (Text.decodeUtf8' bytes)
-                  handleClientInput echo repl text
+                  handleClientInput repl text
                   loop
         -- Forward our stdin into the repl. This makes the foregrounded repld server interactive.
         Ki.fork_ scope do
@@ -89,19 +76,11 @@ theMain replCommand (not -> echo) = do
         exitWith (ExitFailure 1)
       withUnixSocketServer socketPath action
 
-handleClientInput ::
-  -- | Echo client input?
-  Bool ->
-  -- | Running repl
-  RunningRepl ->
-  -- | Client input
-  Text ->
-  IO ()
-handleClientInput echo repl (canonicalizeClientInput -> input) = do
+handleClientInput :: RunningRepl -> Text -> IO ()
+handleClientInput repl (canonicalizeClientInput -> input) = do
   clearTerminal
   width <- getConsoleWidth
   putReplCommand width
-  putClientInput width
   writeRepl repl (Text.unlines input)
   where
     clearTerminal :: IO ()
@@ -119,12 +98,6 @@ handleClientInput echo repl (canonicalizeClientInput -> input) = do
     putReplCommand width =
       (putStrLn . style [vivid white bg, vivid black fg])
         (runningReplCommand repl ++ replicate (width - length (runningReplCommand repl)) ' ')
-
-    putClientInput :: Int -> IO ()
-    putClientInput width =
-      when echo do
-        for_ input \line -> Text.putStrLn (Text.pack (style [vivid blue fg] "≫ ") <> line)
-        Text.putStrLn (Text.replicate width "─")
 
 -- | Canonicalize client input by:
 --
@@ -237,10 +210,7 @@ style :: [Console.SGR] -> String -> String
 style code s =
   Console.setSGRCode code ++ s ++ Console.setSGRCode [Console.Reset]
 
-vivid ::
-  Console.Color ->
-  Console.ConsoleLayer ->
-  Console.SGR
+vivid :: Console.Color -> Console.ConsoleLayer -> Console.SGR
 vivid color layer =
   Console.SetColor layer Console.Vivid color
 

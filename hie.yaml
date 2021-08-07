@@ -3,8 +3,8 @@ cradle:
     - path: "./src"
       component: "lib:repld"
 
-    - path: "././Repld.hs"
+    - path: "./app/repld/Main.hs"
       component: "repld:exe:repld"
 
-    - path: "././RepldSend.hs"
+    - path: "./app/repld-send/Main.hs"
       component: "repld:exe:repld-send"

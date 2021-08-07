@@ -4,6 +4,8 @@ name: repld
 version: 0
 
 common component
+  build-depends:
+    base ^>= 4.12 || ^>= 4.13 || ^>= 4.14,
   default-extensions:
     BlockArguments
     DerivingStrategies
@@ -18,7 +20,6 @@ common component
 library
   import: component
   build-depends:
-    base ^>= 4.12 || ^>= 4.13 || ^>= 4.14,
     directory,
     filepath,
     network,
@@ -32,13 +33,11 @@ executable repld
   import: component
   build-depends:
     ansi-terminal,
-    base,
     bytestring,
     directory,
     haskeline,
     ki ^>= 0.2,
     network,
-    optparse-applicative,
     repld,
     safe-exceptions,
     split,
@@ -46,16 +45,17 @@ executable repld
     terminal-size,
     text,
     typed-process,
-  ghc-options: -fno-warn-name-shadowing -O -threaded -with-rtsopts=-N
-  main-is: Repld.hs
+  ghc-options: -O -threaded -with-rtsopts=-N
+  hs-source-dirs: app/repld
+  main-is: Main.hs
 
 executable repld-send
   import: component
   build-depends:
-    base,
     bytestring,
     network,
     repld,
     safe-exceptions,
   ghc-options: -O
-  main-is: RepldSend.hs
+  hs-source-dirs: app/repld-send
+  main-is: Main.hs
