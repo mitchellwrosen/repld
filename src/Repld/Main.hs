@@ -1,26 +1,27 @@
-module Repld.Main where
+module Repld.Main
+  ( repld,
+    repldSend,
+  )
+where
 
-import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
-import Control.Exception.Safe (bracket_, catchAny, throwIO)
-import Control.Monad (forever, unless, void, when)
+import Control.Exception.Safe (catchAny, throwIO)
+import Control.Monad (forever, when)
 import Control.Monad.IO.Class (liftIO)
-import qualified Data.ByteString as ByteString
 import Data.Char (isSpace)
-import Data.Function (fix, (&))
+import Data.Function ((&))
 import Data.List.Split (splitOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
 import qualified Ki
-import Network.Socket
-import Network.Socket.ByteString (recv)
+import Repld.Server (runServer)
+import qualified Repld.Socket as Socket
 import RepldCommon
 import qualified System.Console.ANSI as Console
 import qualified System.Console.Haskeline as Haskeline
 import qualified System.Console.Terminal.Size as Console
-import System.Directory (doesFileExist, removeFile)
+import System.Directory (doesFileExist)
 import System.Environment (getArgs)
 import System.Exit (ExitCode (ExitFailure), exitFailure, exitWith)
 import System.IO
@@ -36,45 +37,32 @@ repld = do
   disableBuffering stdout
   disableBuffering stderr
 
-  withRepldSocket \sock ->
-    withRepl command \repl -> do
-      Ki.scoped \scope -> do
-        -- Accept clients forever. Handle one connected client's socket by forwarding all lines to the repl. Although
-        -- the input is on a stream socket, we assume we receive an entire "request" in one 8K read.
-        -- TODO wire format
-        Ki.fork_ scope do
-          forever do
-            (client, _addr) <- accept sock
-            -- Ephemeral background thread for each client - don't care if/how it dies.
-            (void . forkIO) do
-              fix \loop -> do
-                bytes <- recv client 8192
-                unless (ByteString.null bytes) do
-                  text <- either throwIO pure (Text.decodeUtf8' bytes)
-                  handleClientInput repl text
-                  loop
-        -- Forward our stdin into the repl. This makes the foregrounded repld server interactive.
-        Ki.fork_ scope do
-          let loop :: Haskeline.InputT IO ()
-              loop =
-                whenJustM (Haskeline.getInputLine "") \line -> do
-                  liftIO (writelnRepl repl (Text.pack line))
-                  loop
-          Haskeline.runInputT Haskeline.defaultSettings loop
-          hClose (getStdin (runningReplProcess repl))
-        -- Forward repl's stdout to our stdout.
-        Ki.fork_ scope (forever (readRepl repl >>= Text.putStr))
-        exitCode <- atomically (waitForReplToExit repl)
-        exitWith exitCode
-  where
-    withRepldSocket :: (Socket -> IO a) -> IO a
-    withRepldSocket action = do
-      socketPath <- getRepldSocketPath
-      whenM (doesFileExist socketPath) do
-        hPutStrLn stderr ("The repld socket " ++ socketPath ++ " already exists.")
-        hPutStrLn stderr "Perhaps repld is already running, or crashed?"
-        exitWith (ExitFailure 1)
-      withUnixSocketServer socketPath action
+  socketPath <- getRepldSocketPath
+  whenM (doesFileExist socketPath) do
+    hPutStrLn stderr ("The repld socket " ++ socketPath ++ " already exists.")
+    hPutStrLn stderr "Perhaps repld is already running, or crashed?"
+    exitWith (ExitFailure 1)
+
+  withRepl command \repl -> do
+    Ki.scoped \scope -> do
+      -- Handle client requests by forwarding all lines to the repl.
+      Ki.fork_ scope do
+        runServer socketPath \request -> do
+          handleClientInput repl request
+          pure ""
+      -- Forward our stdin into the repl. This makes the foregrounded repld server interactive.
+      Ki.fork_ scope do
+        let loop :: Haskeline.InputT IO ()
+            loop =
+              whenJustM (Haskeline.getInputLine "") \line -> do
+                liftIO (writelnRepl repl (Text.pack line))
+                loop
+        Haskeline.runInputT Haskeline.defaultSettings loop
+        hClose (getStdin (runningReplProcess repl))
+      -- Forward repl's stdout to our stdout.
+      Ki.fork_ scope (forever (readRepl repl >>= Text.putStr))
+      exitCode <- atomically (waitForReplToExit repl)
+      exitWith exitCode
 
 handleClientInput :: RunningRepl -> Text -> IO ()
 handleClientInput repl (canonicalizeClientInput -> input) = do
@@ -120,6 +108,20 @@ canonicalizeClientInput text = do
   filter (not . Text.null) (map strip block)
 
 --------------------------------------------------------------------------------
+-- repld-send
+-------------------------------------------------------------------------------
+
+repldSend :: IO ()
+repldSend = do
+  socketPath <- getRepldSocketPath
+  (`catchAny` \_ -> exitFailure) do
+    Socket.connect socketPath \sock -> do
+      text <- Text.hGetContents stdin
+      Socket.send sock text
+      _ <- Socket.recv sock
+      pure ()
+
+--------------------------------------------------------------------------------
 -- Running repl
 -------------------------------------------------------------------------------
 
@@ -162,10 +164,6 @@ waitForReplToExit :: RunningRepl -> STM ExitCode
 waitForReplToExit =
   waitExitCodeSTM . runningReplProcess
 
-killRepl :: RunningRepl -> IO ()
-killRepl =
-  stopProcess . runningReplProcess
-
 --------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------
@@ -173,18 +171,6 @@ killRepl =
 disableBuffering :: Handle -> IO ()
 disableBuffering h =
   hSetBuffering h NoBuffering
-
--- | Run an IO action, ignoring synchronous exceptions
-ignoringExceptions :: IO () -> IO ()
-ignoringExceptions action =
-  action `catchAny` \_ -> pure ()
-
-withUnixSocketServer :: FilePath -> (Socket -> IO a) -> IO a
-withUnixSocketServer path action =
-  withUnixSocket \sock ->
-    bracket_ (bind sock (SockAddrUnix path)) (ignoringExceptions (removeFile path)) do
-      listen sock 5
-      action sock
 
 whenM :: Monad m => m Bool -> m () -> m ()
 whenM mb mx = do
@@ -196,11 +182,6 @@ whenJustM mx f =
   mx >>= \case
     Nothing -> pure ()
     Just x -> f x
-
-whileM :: Monad m => m (Maybe a) -> (a -> m ()) -> m ()
-whileM mx f =
-  fix \loop ->
-    whenJustM mx (\x -> f x >> loop)
 
 --------------------------------------------------------------------------------
 -- Saner color API
@@ -217,10 +198,6 @@ vivid color layer =
 black :: Console.Color
 black =
   Console.Black
-
-blue :: Console.Color
-blue =
-  Console.Blue
 
 white :: Console.Color
 white =

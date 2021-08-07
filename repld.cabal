@@ -35,6 +35,8 @@ library
     typed-process ^>= 0.2.5,
   exposed-modules:
     Repld.Main
+    Repld.Server
+    Repld.Socket
     RepldCommon
   hs-source-dirs: src
 
