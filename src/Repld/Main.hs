@@ -5,7 +5,7 @@ module Repld.Main
 where
 
 import Control.Concurrent.STM
-import Control.Exception.Safe (catchAny, throwIO)
+import Control.Exception.Safe (catchAny, throwIO, tryAny)
 import Data.Char (isSpace)
 import Data.List.Split (splitOn)
 import qualified Data.Text as Text
@@ -21,7 +21,7 @@ import qualified System.Console.Haskeline as Haskeline
 import qualified System.Console.Terminal.Size as Console
 import System.Directory (XdgDirectory (XdgData), createDirectoryIfMissing, doesFileExist, getXdgDirectory)
 import System.Environment (getArgs, lookupEnv)
-import System.Exit (ExitCode (ExitFailure), exitFailure, exitWith)
+import System.Exit (exitFailure, exitWith)
 import System.FilePath ((</>))
 import System.IO
 
@@ -40,17 +40,22 @@ repld = do
   hSetBuffering stderr NoBuffering
 
   socketPath <- getRepldSocketPath
+
+  -- If repld appears to already be running, try connecting to it. If this fails, that means repld crashed without
+  -- cleaning up its socket, so we are free to continue. Otherwise, we just report that repld is already running and
+  -- exit.
   whenM (doesFileExist socketPath) do
-    hPutStrLn stderr ("The repld socket " ++ socketPath ++ " already exists.")
-    hPutStrLn stderr "Perhaps repld is already running, or crashed?"
-    exitWith (ExitFailure 1)
+    tryAny (Socket.connect socketPath \_ -> pure ()) >>= \case
+      Left _ -> pure ()
+      Right () -> do
+        hPutStrLn stderr "repld is already running."
+        exitFailure
 
   runRepl command \repl -> do
     Ki.scoped \scope -> do
       -- Handle client requests by forwarding all lines to the repl.
       Ki.fork_ scope do
         runServer socketPath \case
-          Socket.Frame "hello" _ -> pure (Socket.Frame "hello" "")
           Socket.Frame "send" bytes -> do
             handleClientInput repl bytes
             pure (Socket.Frame "send" "")
