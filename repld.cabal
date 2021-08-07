@@ -10,6 +10,7 @@ common component
     BlockArguments
     DerivingStrategies
     LambdaCase
+    NamedFieldPuns
     NumericUnderscores
     OverloadedStrings
     ScopedTypeVariables
@@ -36,8 +37,10 @@ library
     typed-process ^>= 0.2.5,
   exposed-modules:
     Repld.Aeson
+    Repld.Ansi
     Repld.Main
     Repld.Prelude
+    Repld.Repl
     Repld.Server
     Repld.Socket
   hs-source-dirs: src

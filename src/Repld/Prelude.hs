@@ -14,3 +14,14 @@ import Data.Text as X (Text)
 mapLeft :: (a -> b) -> Either a c -> Either b c
 mapLeft =
   first
+
+whenJustM :: Monad m => m (Maybe a) -> (a -> m ()) -> m ()
+whenJustM mx f =
+  mx >>= \case
+    Nothing -> pure ()
+    Just x -> f x
+
+whenM :: Monad m => m Bool -> m () -> m ()
+whenM mb mx = do
+  b <- mb
+  when b mx

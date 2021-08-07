@@ -11,7 +11,9 @@ import Data.List.Split (splitOn)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified Ki
+import Repld.Ansi
 import Repld.Prelude
+import Repld.Repl
 import Repld.Server (runServer)
 import qualified Repld.Socket as Socket
 import qualified System.Console.ANSI as Console
@@ -22,7 +24,10 @@ import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (ExitFailure), exitFailure, exitWith)
 import System.FilePath ((</>))
 import System.IO
-import System.Process.Typed
+
+--------------------------------------------------------------------------------
+-- repld
+-------------------------------------------------------------------------------
 
 repld :: IO ()
 repld = do
@@ -31,8 +36,8 @@ repld = do
       [command] -> pure command
       _ -> exitFailure
 
-  disableBuffering stdout
-  disableBuffering stderr
+  hSetBuffering stdout NoBuffering
+  hSetBuffering stderr NoBuffering
 
   socketPath <- getRepldSocketPath
   whenM (doesFileExist socketPath) do
@@ -40,11 +45,12 @@ repld = do
     hPutStrLn stderr "Perhaps repld is already running, or crashed?"
     exitWith (ExitFailure 1)
 
-  withRepl command \repl -> do
+  runRepl command \repl -> do
     Ki.scoped \scope -> do
       -- Handle client requests by forwarding all lines to the repl.
       Ki.fork_ scope do
         runServer socketPath \case
+          Socket.Frame "hello" _ -> pure (Socket.Frame "hello" "")
           Socket.Frame "send" bytes -> do
             handleClientInput repl bytes
             pure (Socket.Frame "send" "")
@@ -57,13 +63,13 @@ repld = do
                 liftIO (writelnRepl repl (Text.pack line))
                 loop
         Haskeline.runInputT Haskeline.defaultSettings loop
-        hClose (getStdin (runningReplProcess repl))
+        closeReplStdin repl
       -- Forward repl's stdout to our stdout.
       Ki.fork_ scope (forever (readRepl repl >>= Text.putStr))
       exitCode <- atomically (waitForReplToExit repl)
       exitWith exitCode
 
-handleClientInput :: RunningRepl -> Text -> IO ()
+handleClientInput :: Repl -> Text -> IO ()
 handleClientInput repl (canonicalizeClientInput -> input) = do
   clearTerminal
   width <- getConsoleWidth
@@ -84,7 +90,7 @@ handleClientInput repl (canonicalizeClientInput -> input) = do
     putReplCommand :: Int -> IO ()
     putReplCommand width =
       (putStrLn . style [vivid white bg, vivid black fg])
-        (runningReplCommand repl ++ replicate (width - length (runningReplCommand repl)) ' ')
+        (replCommand repl ++ replicate (width - length (replCommand repl)) ' ')
 
 -- | Canonicalize client input by:
 --
@@ -120,53 +126,6 @@ repldSend = do
       _ <- Socket.recv sock
       pure ()
 
---------------------------------------------------------------------------------
--- Running repl
--------------------------------------------------------------------------------
-
-data RunningRepl = RunningRepl
-  { runningReplCommand :: String,
-    runningReplProcess :: Process Handle Handle ()
-  }
-
-withRepl :: String -> (RunningRepl -> IO a) -> IO a
-withRepl command action =
-  withProcessWait config \process -> do
-    disableBuffering (getStdin process)
-    disableBuffering (getStdout process)
-    action
-      RunningRepl
-        { runningReplCommand = command,
-          runningReplProcess = process
-        }
-  where
-    config :: ProcessConfig Handle Handle ()
-    config =
-      shell command
-        & setDelegateCtlc True
-        & setStdin createPipe
-        & setStdout createPipe
-
-readRepl :: RunningRepl -> IO Text
-readRepl =
-  Text.hGetChunk . getStdout . runningReplProcess
-
-writeRepl :: RunningRepl -> Text -> IO ()
-writeRepl =
-  Text.hPutStr . getStdin . runningReplProcess
-
-writelnRepl :: RunningRepl -> Text -> IO ()
-writelnRepl =
-  Text.hPutStrLn . getStdin . runningReplProcess
-
-waitForReplToExit :: RunningRepl -> STM ExitCode
-waitForReplToExit =
-  waitExitCodeSTM . runningReplProcess
-
---------------------------------------------------------------------------------
--- Helpers
---------------------------------------------------------------------------------
-
 getRepldSocketPath :: IO FilePath
 getRepldSocketPath = do
   repldDir <-
@@ -175,46 +134,3 @@ getRepldSocketPath = do
       Just dir -> pure (dir </> "repld")
   createDirectoryIfMissing True repldDir
   pure (repldDir </> "repld")
-
-disableBuffering :: Handle -> IO ()
-disableBuffering h =
-  hSetBuffering h NoBuffering
-
-whenM :: Monad m => m Bool -> m () -> m ()
-whenM mb mx = do
-  b <- mb
-  when b mx
-
-whenJustM :: Monad m => m (Maybe a) -> (a -> m ()) -> m ()
-whenJustM mx f =
-  mx >>= \case
-    Nothing -> pure ()
-    Just x -> f x
-
---------------------------------------------------------------------------------
--- Saner color API
---------------------------------------------------------------------------------
-
-style :: [Console.SGR] -> String -> String
-style code s =
-  Console.setSGRCode code ++ s ++ Console.setSGRCode [Console.Reset]
-
-vivid :: Console.Color -> Console.ConsoleLayer -> Console.SGR
-vivid color layer =
-  Console.SetColor layer Console.Vivid color
-
-black :: Console.Color
-black =
-  Console.Black
-
-white :: Console.Color
-white =
-  Console.White
-
-bg :: Console.ConsoleLayer
-bg =
-  Console.Background
-
-fg :: Console.ConsoleLayer
-fg =
-  Console.Foreground
