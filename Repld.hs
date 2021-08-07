@@ -1,9 +1,8 @@
 module Main where
 
 import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar
 import Control.Concurrent.STM
-import Control.Exception.Safe (bracket_, catchAny, finally, throwIO)
+import Control.Exception.Safe (bracket_, catchAny, throwIO)
 import Control.Monad (forever, join, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as ByteString
@@ -27,7 +26,6 @@ import System.Directory (doesFileExist, removeFile)
 import System.Exit (ExitCode (ExitFailure), exitWith)
 import System.IO
 import System.Process.Typed
-import System.Timeout (timeout)
 
 main :: IO ()
 main =
@@ -54,15 +52,31 @@ theMain replCommand (not -> echo) = do
 
   withRepldSocket \sock ->
     withRepl replCommand \repl -> do
-      doneInitializingVar <- newEmptyMVar
-
       Ki.scoped \scope -> do
-        Ki.fork_ scope (acceptThread sock (handleClientInput echo repl))
-        Ki.fork_ scope (stdinThread repl)
-        Ki.fork_ scope (replStdoutThread (putMVar doneInitializingVar ()) repl)
-        -- Fake client input to clear the screen and such
-        takeMVar doneInitializingVar
-        handleClientInput echo repl ""
+        -- Accept clients forever. Handle one connected client's socket by forwarding all lines to the repl. Although
+        -- the input is on a stream socket, we assume we receive an entire "request" in one 8K read.
+        -- TODO wire format
+        Ki.fork_ scope do
+          forever do
+            (client, _addr) <- accept sock
+            -- Ephemeral background thread for each client - don't care if/how it dies.
+            (void . forkIO) do
+              fix \loop -> do
+                bytes <- recv client 8192
+                unless (ByteString.null bytes) do
+                  text <- either throwIO pure (Text.decodeUtf8' bytes)
+                  handleClientInput echo repl text
+                  loop
+        -- Forward our stdin into the repl. This makes the foregrounded repld server interactive.
+        Ki.fork_ scope do
+          let loop :: Haskeline.InputT IO ()
+              loop =
+                whenJustM (Haskeline.getInputLine "") \line -> do
+                  liftIO (writelnRepl repl (Text.pack line))
+                  loop
+          Haskeline.runInputT Haskeline.defaultSettings loop
+        -- Forward repl's stdout to our stdout.
+        Ki.fork_ scope (forever (readRepl repl >>= Text.putStr))
         exitCode <- atomically (waitForReplToExit repl)
         exitWith exitCode
   where
@@ -131,43 +145,6 @@ canonicalizeClientInput text = do
         Text.stripEnd . Text.drop leadingWhitespace
 
   filter (not . Text.null) (map strip block)
-
--- | Accept clients forever.
-acceptThread :: Socket -> (Text -> IO ()) -> IO ()
-acceptThread sock handleInput =
-  forever do
-    (clientSock, _clientSockAddr) <- accept sock
-    -- Ephemeral background thread for each client - don't care if/how it dies.
-    void (forkIO (clientThread clientSock handleInput))
-
--- | Handle one connected client's socket by forwarding all lines to the repl. Although the input is on a stream socket,
--- I am assuming that I receive an entire "request" in one 8K read.
-clientThread :: Socket -> (Text -> IO ()) -> IO ()
-clientThread sock handleInput =
-  fix \loop -> do
-    bytes <- recv sock 8192
-    unless (ByteString.null bytes) do
-      text <- either throwIO pure (Text.decodeUtf8' bytes)
-      handleInput text
-      loop
-
--- | Forward stdin to this process onto the repl. This makes the foregrounded repld server interactive.
-stdinThread :: RunningRepl -> IO ()
-stdinThread repl =
-  Haskeline.runInputT Haskeline.defaultSettings loop
-  where
-    loop :: Haskeline.InputT IO ()
-    loop =
-      whenJustM (Haskeline.getInputLine "") \line -> do
-        liftIO (writelnRepl repl (Text.pack line))
-        loop
-
-replStdoutThread :: IO () -> RunningRepl -> IO ()
-replStdoutThread doneInitializing repl = do
-  -- In the "initialization phase", expect some output every 1s
-  whileM (timeout 1_000_000 (readRepl repl)) Text.putStr `finally` doneInitializing
-  -- Then, notify that we've initialized, and proceed to forward all repl stdout to the terminal.
-  forever (readRepl repl >>= Text.putStr)
 
 --------------------------------------------------------------------------------
 -- Running repl
