@@ -14,14 +14,13 @@ import qualified Repld.Socket as Socket
 -- TODO wire format, typed requests, etc
 runServer :: FilePath -> (Text -> IO Text) -> IO ()
 runServer path handle =
-  Socket.bind path \server -> do
-    Socket.listen server 5
+  Socket.bind path \server ->
     forever do
-      client <- Socket.accept server
-      tryAny (Socket.recv client) >>= \case
-        Left _ -> pure ()
-        Right Nothing -> pure ()
-        Right (Just request) -> do
-          response <- handle request
-          _ <- tryAny (Socket.send client response)
-          pure ()
+      Socket.accept server \client ->
+        tryAny (Socket.recv client) >>= \case
+          Left _ -> pure ()
+          Right Nothing -> pure ()
+          Right (Just request) -> do
+            response <- handle request
+            _ <- tryAny (Socket.send client response)
+            pure ()

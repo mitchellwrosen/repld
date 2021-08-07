@@ -5,14 +5,13 @@ module Repld.Socket
     accept,
     bind,
     connect,
-    Socket.listen,
     new,
     recv,
     send,
   )
 where
 
-import Control.Exception.Safe (bracket, bracket_, catchAny, throwIO)
+import Control.Exception.Safe (bracket, bracketOnError, bracket_, catchAny, throwIO)
 import qualified Data.ByteString as ByteString
 import Data.Text (Text)
 import qualified Data.Text.Encoding as Text
@@ -36,14 +35,16 @@ import System.Directory (removeFile)
 type Frame =
   Text
 
-accept :: Socket -> IO Socket
-accept =
-  fmap fst . Socket.accept
+accept :: Socket -> (Socket -> IO a) -> IO a
+accept server =
+  bracketOnError (fst <$> Socket.accept server) Socket.close
 
 bind :: FilePath -> (Socket -> IO a) -> IO a
 bind path action =
   new \socket ->
-    bracket_ (Socket.bind socket (Socket.SockAddrUnix path)) (ignoringExceptions (removeFile path)) (action socket)
+    bracket_ (Socket.bind socket (Socket.SockAddrUnix path)) (ignoringExceptions (removeFile path)) do
+      Socket.listen socket 5
+      action socket
 
 connect :: FilePath -> (Socket -> IO a) -> IO a
 connect path action =
