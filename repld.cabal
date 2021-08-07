@@ -20,6 +20,7 @@ common component
 library
   import: component
   build-depends:
+    aeson,
     ansi-terminal,
     bytestring,
     directory,
@@ -34,10 +35,11 @@ library
     text,
     typed-process ^>= 0.2.5,
   exposed-modules:
+    Repld.Aeson
     Repld.Main
+    Repld.Prelude
     Repld.Server
     Repld.Socket
-    RepldCommon
   hs-source-dirs: src
 
 executable repld

@@ -4,15 +4,12 @@ module Repld.Server
 where
 
 import Control.Exception.Safe (tryAny)
-import Control.Monad (forever)
-import Data.Text (Text)
+import Repld.Prelude
 import qualified Repld.Socket as Socket
 
 -- Run a single-threaded unix socket server, which handles requests from trusted clients one at a time. Each client
 -- connects, sends a single Text request, waits for a Text response, and closes its socket.
---
--- TODO wire format, typed requests, etc
-runServer :: FilePath -> (Text -> IO Text) -> IO ()
+runServer :: FilePath -> (Socket.Frame -> IO Socket.Frame) -> IO ()
 runServer path handle =
   Socket.bind path \server ->
     forever do

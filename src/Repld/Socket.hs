@@ -1,6 +1,6 @@
 -- | A small unix socket API with (TODO) framing.
 module Repld.Socket
-  ( Frame,
+  ( Frame (..),
     Socket,
     accept,
     bind,
@@ -11,10 +11,12 @@ module Repld.Socket
   )
 where
 
-import Control.Exception.Safe (bracket, bracketOnError, bracket_, catchAny, throwIO)
+import Control.Exception.Safe (bracket, bracketOnError, bracket_, catchAny)
+import qualified Data.Aeson as Aeson (Value, pairs, withObject, (.=))
+import qualified Data.Aeson.Encoding as Aeson (encodingToLazyByteString)
+import qualified Data.Aeson.Types as Aeson (Parser, parseField)
 import qualified Data.ByteString as ByteString
-import Data.Text (Text)
-import qualified Data.Text.Encoding as Text
+import qualified Data.ByteString.Lazy as LazyByteString
 import Network.Socket (Socket)
 import qualified Network.Socket as Socket
   ( Family (AF_UNIX),
@@ -29,11 +31,9 @@ import qualified Network.Socket as Socket
     socket,
   )
 import qualified Network.Socket.ByteString as Socket (recv, sendAll)
+import qualified Repld.Aeson as Aeson (decode)
+import Repld.Prelude
 import System.Directory (removeFile)
-
--- TODO framing
-type Frame =
-  Text
 
 accept :: Socket -> (Socket -> IO a) -> IO a
 accept server =
@@ -59,20 +59,43 @@ new =
 -- | Receive a single frame, or Nothing if the peer has disconnected.
 recv :: Socket -> IO (Maybe Frame)
 recv socket = do
-  -- TODO framing; here we just assume a frame is read in one up-to-8k read
+  -- TODO here we just assume a frame is read in one up-to-8k read
   bytes <- Socket.recv socket 8192
-  if ByteString.null bytes
-    then pure Nothing
-    else case Text.decodeUtf8' bytes of
-      Left ex -> throwIO ex
-      Right text -> pure (Just text)
+  pure
+    if ByteString.null bytes
+      then Nothing
+      else case deserializeFrame bytes of
+        Left _ -> Nothing
+        Right frame -> Just frame
 
 -- | Send a single frame.
 send :: Socket -> Frame -> IO ()
-send socket text =
-  Socket.sendAll socket (Text.encodeUtf8 text)
+send socket frame =
+  Socket.sendAll socket (serializeFrame frame)
 
 -- | Run an IO action, ignoring synchronous exceptions
 ignoringExceptions :: IO () -> IO ()
 ignoringExceptions action =
   action `catchAny` \_ -> pure ()
+
+-- Frame
+
+data Frame
+  = Frame Text Text
+
+deserializeFrame :: ByteString -> Either String Frame
+deserializeFrame =
+  Aeson.decode parser
+  where
+    parser :: Aeson.Value -> Aeson.Parser Frame
+    parser =
+      Aeson.withObject "frame" \object ->
+        Frame
+          <$> Aeson.parseField object "type"
+          <*> Aeson.parseField object "data"
+
+serializeFrame :: Frame -> ByteString
+serializeFrame (Frame type_ data_) =
+  Aeson.pairs ("type" Aeson..= type_ <> "data" Aeson..= data_)
+    & Aeson.encodingToLazyByteString
+    & LazyByteString.toStrict

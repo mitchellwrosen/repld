@@ -6,24 +6,21 @@ where
 
 import Control.Concurrent.STM
 import Control.Exception.Safe (catchAny, throwIO)
-import Control.Monad (forever, when)
-import Control.Monad.IO.Class (liftIO)
 import Data.Char (isSpace)
-import Data.Function ((&))
 import Data.List.Split (splitOn)
-import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified Ki
+import Repld.Prelude
 import Repld.Server (runServer)
 import qualified Repld.Socket as Socket
-import RepldCommon
 import qualified System.Console.ANSI as Console
 import qualified System.Console.Haskeline as Haskeline
 import qualified System.Console.Terminal.Size as Console
-import System.Directory (doesFileExist)
-import System.Environment (getArgs)
+import System.Directory (XdgDirectory (XdgData), createDirectoryIfMissing, doesFileExist, getXdgDirectory)
+import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (ExitFailure), exitFailure, exitWith)
+import System.FilePath ((</>))
 import System.IO
 import System.Process.Typed
 
@@ -47,9 +44,11 @@ repld = do
     Ki.scoped \scope -> do
       -- Handle client requests by forwarding all lines to the repl.
       Ki.fork_ scope do
-        runServer socketPath \request -> do
-          handleClientInput repl request
-          pure ""
+        runServer socketPath \case
+          Socket.Frame "send" bytes -> do
+            handleClientInput repl bytes
+            pure (Socket.Frame "send" "")
+          _ -> pure (Socket.Frame "error" "unrecognized frame")
       -- Forward our stdin into the repl. This makes the foregrounded repld server interactive.
       Ki.fork_ scope do
         let loop :: Haskeline.InputT IO ()
@@ -117,7 +116,7 @@ repldSend = do
   (`catchAny` \_ -> exitFailure) do
     Socket.connect socketPath \sock -> do
       text <- Text.hGetContents stdin
-      Socket.send sock text
+      Socket.send sock (Socket.Frame "send" text)
       _ <- Socket.recv sock
       pure ()
 
@@ -167,6 +166,15 @@ waitForReplToExit =
 --------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------
+
+getRepldSocketPath :: IO FilePath
+getRepldSocketPath = do
+  repldDir <-
+    lookupEnv "XDG_RUNTIME_DIR" >>= \case
+      Nothing -> getXdgDirectory XdgData "repld"
+      Just dir -> pure (dir </> "repld")
+  createDirectoryIfMissing True repldDir
+  pure (repldDir </> "repld")
 
 disableBuffering :: Handle -> IO ()
 disableBuffering h =
