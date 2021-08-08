@@ -4,26 +4,21 @@ module Repld.Main
   )
 where
 
-import Control.Concurrent.STM
-import Control.Exception.Safe (catchAny, throwIO, tryAny)
-import Data.Char (isSpace)
-import Data.List.Split (splitOn)
+import Control.Exception.Safe (catchAny, tryAny)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified Ki
-import Repld.Ansi
 import Repld.Prelude
-import Repld.Repl
 import Repld.Server (runServer)
 import qualified Repld.Socket as Socket
 import qualified System.Console.ANSI as Console
 import qualified System.Console.Haskeline as Haskeline
-import qualified System.Console.Terminal.Size as Console
 import System.Directory (XdgDirectory (XdgData), createDirectoryIfMissing, doesFileExist, getXdgDirectory)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (exitFailure, exitWith)
 import System.FilePath ((</>))
 import System.IO
+import qualified System.Process.Typed as Process
 
 --------------------------------------------------------------------------------
 -- repld
@@ -41,81 +36,42 @@ repld = do
 
   socketPath <- getRepldSocketPath
 
-  -- If repld appears to already be running, try connecting to it. If this fails, that means repld crashed without
-  -- cleaning up its socket, so we are free to continue. Otherwise, we just report that repld is already running and
-  -- exit.
+  -- A server socket may have been left around from a previous repld run that did not exit gracefully.
   whenM (doesFileExist socketPath) do
     tryAny (Socket.connect socketPath \_ -> pure ()) >>= \case
-      Left _ -> pure ()
+      Left _ -> pure () -- it's dead, jim
       Right () -> do
         hPutStrLn stderr "repld is already running."
         exitFailure
 
-  runRepl command \repl -> do
+  let replConfig :: Process.ProcessConfig Handle () ()
+      replConfig =
+        Process.shell command
+          & Process.setDelegateCtlc True
+          & Process.setStdin Process.createPipe
+
+  Process.withProcessWait replConfig \repl -> do
+    hSetBuffering (Process.getStdin repl) NoBuffering
+
     Ki.scoped \scope -> do
-      -- Handle client requests by forwarding all lines to the repl.
       Ki.fork_ scope do
         runServer socketPath \case
           Socket.Frame "send" bytes -> do
-            handleClientInput repl bytes
+            Console.setCursorPosition 0 0
+            Console.clearFromCursorToScreenEnd
+            Text.hPutStr (Process.getStdin repl) bytes
             pure (Socket.Frame "send" "")
           _ -> pure (Socket.Frame "error" "unrecognized frame")
-      -- Forward our stdin into the repl. This makes the foregrounded repld server interactive.
       Ki.fork_ scope do
         let loop :: Haskeline.InputT IO ()
             loop =
               whenJustM (Haskeline.getInputLine "") \line -> do
-                liftIO (writelnRepl repl (Text.pack line))
+                liftIO (Text.hPutStrLn (Process.getStdin repl) (Text.pack line))
                 loop
         Haskeline.runInputT Haskeline.defaultSettings loop
-        closeReplStdin repl
-      -- Forward repl's stdout to our stdout.
-      Ki.fork_ scope (forever (readRepl repl >>= Text.putStr))
-      exitCode <- atomically (waitForReplToExit repl)
+        hClose (Process.getStdin repl)
+      exitCode <- Process.waitExitCode repl
       exitWith exitCode
-
-handleClientInput :: Repl -> Text -> IO ()
-handleClientInput repl (canonicalizeClientInput -> input) = do
-  clearTerminal
-  width <- getConsoleWidth
-  putReplCommand width
-  writeRepl repl (Text.unlines input)
-  where
-    clearTerminal :: IO ()
-    clearTerminal = do
-      Console.setCursorPosition 0 0
-      Console.clearFromCursorToScreenEnd
-
-    getConsoleWidth :: IO Int
-    getConsoleWidth =
-      Console.size >>= \case
-        Nothing -> throwIO (userError "Failed to get console width")
-        Just (Console.Window _ w) -> pure w
-
-    putReplCommand :: Int -> IO ()
-    putReplCommand width =
-      (putStrLn . style [vivid white bg, vivid black fg])
-        (replCommand repl ++ replicate (width - length (replCommand repl)) ' ')
-
--- | Canonicalize client input by:
---
---   * Removing leading whitespace (but retaining alignment)
---   * Removing trailing whitespace
-canonicalizeClientInput :: Text -> [Text]
-canonicalizeClientInput text = do
-  block <- splitOn [""] (Text.lines text)
-
-  let leadingWhitespace :: Int
-      leadingWhitespace =
-        -- minimum is safe here (for now...) because if block is null, we don't
-        -- force this value
-        minimum (map (Text.length . Text.takeWhile isSpace) block)
-
-  let strip :: Text -> Text
-      strip =
-        Text.stripEnd . Text.drop leadingWhitespace
-
-  filter (not . Text.null) (map strip block)
 
 --------------------------------------------------------------------------------
 -- repld-send

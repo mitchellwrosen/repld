@@ -31,7 +31,6 @@ library
     network,
     safe-exceptions,
     split,
-    stm,
     terminal-size,
     text,
     typed-process ^>= 0.2.5,
@@ -40,7 +39,6 @@ library
     Repld.Ansi
     Repld.Main
     Repld.Prelude
-    Repld.Repl
     Repld.Server
     Repld.Socket
   hs-source-dirs: src
