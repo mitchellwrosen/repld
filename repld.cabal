@@ -30,13 +30,10 @@ library
     ki ^>= 0.2,
     network,
     safe-exceptions,
-    split,
-    terminal-size,
     text,
     typed-process ^>= 0.2.5,
   exposed-modules:
     Repld.Aeson
-    Repld.Ansi
     Repld.Main
     Repld.Prelude
     Repld.Server
