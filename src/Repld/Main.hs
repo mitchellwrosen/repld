@@ -5,20 +5,20 @@ module Repld.Main
 where
 
 import Control.Exception.Safe (catchAny, tryAny)
-import qualified Data.Text as Text
-import qualified Data.Text.IO as Text
-import qualified Ki
+import Data.Text qualified as Text
+import Data.Text.IO qualified as Text
+import Ki qualified
 import Repld.Prelude
 import Repld.Server (runServer)
-import qualified Repld.Socket as Socket
-import qualified System.Console.ANSI as Console
-import qualified System.Console.Haskeline as Haskeline
+import Repld.Socket qualified as Socket
+import System.Console.ANSI qualified as Console
+import System.Console.Haskeline qualified as Haskeline
 import System.Directory (XdgDirectory (XdgData), createDirectoryIfMissing, doesFileExist, getXdgDirectory)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (exitFailure, exitWith)
 import System.FilePath ((</>))
 import System.IO
-import qualified System.Process.Typed as Process
+import System.Process.Typed qualified as Process
 
 repld :: IO ()
 repld = do

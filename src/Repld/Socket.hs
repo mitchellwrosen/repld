@@ -12,16 +12,15 @@ module Repld.Socket
 where
 
 import Control.Exception.Safe (bracket, bracketOnError, bracket_, catchAny)
--- import qualified Data.Aeson as Aeson
-import qualified Data.Aeson as Aeson (Value, json', pairs, withObject, (.=))
-import qualified Data.Aeson.Encoding as Aeson (encodingToLazyByteString)
-import qualified Data.Aeson.Internal as Aeson (iparse)
-import qualified Data.Aeson.Parser as Aeson (eitherDecodeStrictWith)
-import qualified Data.Aeson.Types as Aeson (Parser, parseField)
-import qualified Data.ByteString as ByteString
-import qualified Data.ByteString.Lazy as LazyByteString
+import Data.Aeson qualified as Aeson (Value, json', pairs, withObject, (.=))
+import Data.Aeson.Encoding qualified as Aeson (encodingToLazyByteString)
+import Data.Aeson.Internal qualified as Aeson (iparse)
+import Data.Aeson.Parser qualified as Aeson (eitherDecodeStrictWith)
+import Data.Aeson.Types qualified as Aeson (Parser, parseField)
+import Data.ByteString qualified as ByteString
+import Data.ByteString.Lazy qualified as LazyByteString
 import Network.Socket (Socket)
-import qualified Network.Socket as Socket
+import Network.Socket qualified as Socket
   ( Family (AF_UNIX),
     SockAddr (..),
     SocketType (Stream),
@@ -33,7 +32,7 @@ import qualified Network.Socket as Socket
     listen,
     socket,
   )
-import qualified Network.Socket.ByteString as Socket (recv, sendAll)
+import Network.Socket.ByteString qualified as Socket (recv, sendAll)
 import Repld.Prelude
 import System.Directory (removeFile)
 

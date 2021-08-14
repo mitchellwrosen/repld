@@ -5,7 +5,7 @@ where
 
 import Control.Exception.Safe (tryAny)
 import Repld.Prelude
-import qualified Repld.Socket as Socket
+import Repld.Socket qualified as Socket
 
 -- | Run a single-threaded unix socket server, which handles requests from trusted clients one at a time. Each client
 -- connects, sends a single request, receives a single response, and closes its socket.
