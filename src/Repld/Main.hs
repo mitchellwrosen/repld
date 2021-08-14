@@ -20,10 +20,6 @@ import System.FilePath ((</>))
 import System.IO
 import qualified System.Process.Typed as Process
 
---------------------------------------------------------------------------------
--- repld
--------------------------------------------------------------------------------
-
 repld :: IO ()
 repld = do
   command <-
@@ -73,14 +69,10 @@ repld = do
       exitCode <- Process.waitExitCode repl
       exitWith exitCode
 
---------------------------------------------------------------------------------
--- repld-send
--------------------------------------------------------------------------------
-
 repldSend :: IO ()
 repldSend = do
-  socketPath <- getRepldSocketPath
   (`catchAny` \_ -> exitFailure) do
+    socketPath <- getRepldSocketPath
     Socket.connect socketPath \sock -> do
       text <- Text.hGetContents stdin
       Socket.send sock (Socket.Frame "send" text)

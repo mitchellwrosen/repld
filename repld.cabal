@@ -33,7 +33,6 @@ library
     text,
     typed-process ^>= 0.2.5,
   exposed-modules:
-    Repld.Aeson
     Repld.Main
     Repld.Prelude
     Repld.Server

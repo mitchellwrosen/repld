@@ -12,8 +12,11 @@ module Repld.Socket
 where
 
 import Control.Exception.Safe (bracket, bracketOnError, bracket_, catchAny)
-import qualified Data.Aeson as Aeson (Value, pairs, withObject, (.=))
+-- import qualified Data.Aeson as Aeson
+import qualified Data.Aeson as Aeson (Value, json', pairs, withObject, (.=))
 import qualified Data.Aeson.Encoding as Aeson (encodingToLazyByteString)
+import qualified Data.Aeson.Internal as Aeson (iparse)
+import qualified Data.Aeson.Parser as Aeson (eitherDecodeStrictWith)
 import qualified Data.Aeson.Types as Aeson (Parser, parseField)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
@@ -31,7 +34,6 @@ import qualified Network.Socket as Socket
     socket,
   )
 import qualified Network.Socket.ByteString as Socket (recv, sendAll)
-import qualified Repld.Aeson as Aeson (decode)
 import Repld.Prelude
 import System.Directory (removeFile)
 
@@ -85,7 +87,7 @@ data Frame
 
 deserializeFrame :: ByteString -> Either String Frame
 deserializeFrame =
-  Aeson.decode parser
+  mapLeft snd . Aeson.eitherDecodeStrictWith Aeson.json' (Aeson.iparse parser)
   where
     parser :: Aeson.Value -> Aeson.Parser Frame
     parser =
