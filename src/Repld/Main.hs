@@ -50,22 +50,24 @@ repld = do
     hSetBuffering (Process.getStdin repl) NoBuffering
 
     Ki.scoped \scope -> do
-      Ki.fork_ scope do
-        runServer socketPath \case
-          Socket.Frame "send" bytes -> do
-            Console.setCursorPosition 0 0
-            Console.clearFromCursorToScreenEnd
-            Text.hPutStr (Process.getStdin repl) bytes
-            pure (Socket.Frame "send" "")
-          _ -> pure (Socket.Frame "error" "unrecognized frame")
-      Ki.fork_ scope do
-        let loop :: Haskeline.InputT IO ()
-            loop =
-              whenJustM (Haskeline.getInputLine "") \line -> do
-                liftIO (Text.hPutStrLn (Process.getStdin repl) (Text.pack line))
-                loop
-        Haskeline.runInputT Haskeline.defaultSettings loop
-        hClose (Process.getStdin repl)
+      _ <-
+        Ki.fork @() scope do
+          runServer socketPath \case
+            Socket.Frame "send" bytes -> do
+              Console.setCursorPosition 0 0
+              Console.clearFromCursorToScreenEnd
+              Text.hPutStr (Process.getStdin repl) bytes
+              pure (Socket.Frame "send" "")
+            _ -> pure (Socket.Frame "error" "unrecognized frame")
+      _ <-
+        Ki.fork @() scope do
+          let loop :: Haskeline.InputT IO ()
+              loop =
+                whenJustM (Haskeline.getInputLine "") \line -> do
+                  liftIO (Text.hPutStrLn (Process.getStdin repl) (Text.pack line))
+                  loop
+          Haskeline.runInputT Haskeline.defaultSettings loop
+          hClose (Process.getStdin repl)
       exitCode <- Process.waitExitCode repl
       exitWith exitCode
 
