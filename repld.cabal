@@ -5,7 +5,7 @@ version: 0
 
 common component
   build-depends:
-    base ^>= 4.14,
+    base ^>= 4.14 || ^>= 4.15 || ^>= 4.16,
   default-extensions:
     BlockArguments
     DerivingStrategies
@@ -22,16 +22,16 @@ common component
 library
   import: component
   build-depends:
-    aeson,
+    aeson ^>= 2.1,
     ansi-terminal,
     bytestring,
     directory,
     filepath,
     haskeline,
-    ki ^>= 0.2,
-    network,
-    safe-exceptions,
-    text,
+    ki ^>= 1.0,
+    network ^>= 3.1,
+    safe-exceptions ^>= 0.1,
+    text ^>= 2.0,
     typed-process ^>= 0.2.5,
   exposed-modules:
     Repld.Main
