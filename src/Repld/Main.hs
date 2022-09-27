@@ -34,7 +34,7 @@ app = do
     command <-
       io getArgs >>= \case
         [command] -> pure command
-        _ -> return (-1)
+        _ -> return 1
 
     io (hSetBuffering stdout NoBuffering)
     io (hSetBuffering stderr NoBuffering)
@@ -47,7 +47,7 @@ app = do
         Left _ -> pure () -- it's dead, jim
         Right () -> do
           io (hPutStrLn stderr "repld is already running.")
-          return (-1)
+          return 1
 
     let replConfig :: Process.ProcessConfig Handle () ()
         replConfig =
