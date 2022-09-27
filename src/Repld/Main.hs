@@ -8,6 +8,7 @@ import Control.Exception.Safe (catchAny, tryAny)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as Text
 import Ki qualified
+import Repld.App
 import Repld.Prelude
 import Repld.Server (runServer)
 import Repld.Socket qualified as Socket
@@ -15,61 +16,72 @@ import System.Console.ANSI qualified as Console
 import System.Console.Haskeline qualified as Haskeline
 import System.Directory (XdgDirectory (XdgData), createDirectoryIfMissing, doesFileExist, getXdgDirectory)
 import System.Environment (getArgs, lookupEnv)
-import System.Exit (exitFailure, exitWith)
+import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitWith)
 import System.FilePath ((</>))
 import System.IO
 import System.Process.Typed qualified as Process
+import Prelude hiding (return)
 
 repld :: IO ()
-repld = do
-  command <-
-    getArgs >>= \case
-      [command] -> pure command
-      _ -> exitFailure
+repld =
+  runApp () app >>= \case
+    0 -> pure ()
+    code -> exitWith (ExitFailure code)
 
-  hSetBuffering stdout NoBuffering
-  hSetBuffering stderr NoBuffering
+app :: App x r Int
+app = do
+  label \return -> do
+    command <-
+      io getArgs >>= \case
+        [command] -> pure command
+        _ -> return (-1)
 
-  socketPath <- getRepldSocketPath
+    io (hSetBuffering stdout NoBuffering)
+    io (hSetBuffering stderr NoBuffering)
 
-  -- A server socket may have been left around from a previous repld run that did not exit gracefully.
-  whenM (doesFileExist socketPath) do
-    tryAny (Socket.connect socketPath \_ -> pure ()) >>= \case
-      Left _ -> pure () -- it's dead, jim
-      Right () -> do
-        hPutStrLn stderr "repld is already running."
-        exitFailure
+    socketPath <- io getRepldSocketPath
 
-  let replConfig :: Process.ProcessConfig Handle () ()
-      replConfig =
-        Process.shell command
-          & Process.setDelegateCtlc True
-          & Process.setStdin Process.createPipe
+    -- A server socket may have been left around from a previous repld run that did not exit gracefully.
+    whenM (io (doesFileExist socketPath)) do
+      io (tryAny (Socket.connect socketPath \_ -> pure ())) >>= \case
+        Left _ -> pure () -- it's dead, jim
+        Right () -> do
+          io (hPutStrLn stderr "repld is already running.")
+          return (-1)
 
-  Process.withProcessWait replConfig \repl -> do
-    hSetBuffering (Process.getStdin repl) NoBuffering
+    let replConfig :: Process.ProcessConfig Handle () ()
+        replConfig =
+          Process.shell command
+            & Process.setDelegateCtlc True
+            & Process.setStdin Process.createPipe
 
-    Ki.scoped \scope -> do
-      _ <-
-        Ki.fork @() scope do
-          runServer socketPath \case
-            Socket.Frame "send" bytes -> do
-              Console.setCursorPosition 0 0
-              Console.clearFromCursorToScreenEnd
-              Text.hPutStr (Process.getStdin repl) bytes
-              pure (Socket.Frame "send" "")
-            _ -> pure (Socket.Frame "error" "unrecognized frame")
-      _ <-
-        Ki.fork @() scope do
-          let loop :: Haskeline.InputT IO ()
-              loop =
-                whenJustM (Haskeline.getInputLine "") \line -> do
-                  liftIO (Text.hPutStrLn (Process.getStdin repl) (Text.pack line))
-                  loop
-          Haskeline.runInputT Haskeline.defaultSettings loop
-          hClose (Process.getStdin repl)
-      exitCode <- Process.waitExitCode repl
-      exitWith exitCode
+    with (Process.withProcessWait replConfig) \repl -> do
+      io (hSetBuffering (Process.getStdin repl) NoBuffering)
+
+      with Ki.scoped \scope -> do
+        _ <-
+          io do
+            Ki.fork @() scope do
+              runServer socketPath \case
+                Socket.Frame "send" bytes -> do
+                  Console.setCursorPosition 0 0
+                  Console.clearFromCursorToScreenEnd
+                  Text.hPutStr (Process.getStdin repl) bytes
+                  pure (Socket.Frame "send" "")
+                _ -> pure (Socket.Frame "error" "unrecognized frame")
+        _ <-
+          io do
+            Ki.fork @() scope do
+              let loop :: Haskeline.InputT IO ()
+                  loop =
+                    whenJustM (Haskeline.getInputLine "") \line -> do
+                      liftIO (Text.hPutStrLn (Process.getStdin repl) (Text.pack line))
+                      loop
+              Haskeline.runInputT Haskeline.defaultSettings loop
+              hClose (Process.getStdin repl)
+        Process.waitExitCode repl >>= \case
+          ExitSuccess -> pure 0
+          ExitFailure code -> return code
 
 repldSend :: IO ()
 repldSend = do

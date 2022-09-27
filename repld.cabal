@@ -8,18 +8,24 @@ common component
     base ^>= 4.14 || ^>= 4.15 || ^>= 4.16,
   default-extensions:
     BlockArguments
+    DefaultSignatures
+    DeriveFunctor
     DerivingStrategies
+    FlexibleContexts
+    FlexibleInstances
     ImportQualifiedPost
     LambdaCase
+    MultiParamTypeClasses
     NamedFieldPuns
     NumericUnderscores
     OverloadedStrings
+    RankNTypes
     ScopedTypeVariables
     TypeApplications
+    TypeFamilies
     ViewPatterns
   default-language: Haskell2010
-  ghc-options:
-    -Weverything
+  ghc-options: -Wall
 
 library
   import: component
@@ -36,6 +42,7 @@ library
     text ^>= 2.0,
     typed-process ^>= 0.2.5,
   exposed-modules:
+    Repld.App
     Repld.Main
     Repld.Prelude
     Repld.Server
@@ -45,7 +52,7 @@ library
 executable repld
   import: component
   build-depends: repld
-  ghc-options: -O -threaded -with-rtsopts=-N
+  ghc-options: -O -threaded
   hs-source-dirs: app/repld
   main-is: Main.hs
 
