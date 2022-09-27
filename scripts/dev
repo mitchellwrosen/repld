@@ -1,0 +1,5 @@
+#!/bin/bash
+
+set -e
+
+ghcid --command 'cabal repl' --restart repld.cabal
