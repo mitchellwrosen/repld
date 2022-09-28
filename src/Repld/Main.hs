@@ -4,7 +4,7 @@ module Repld.Main
   )
 where
 
-import Control.Exception.Safe (catchAny, tryAny)
+import Control.Exception.Safe (bracket, catchAny, tryAny)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as Text
 import Ki qualified
@@ -18,7 +18,7 @@ import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitWith)
 import System.FilePath ((</>))
 import System.IO
-import System.Process.Typed qualified as Process
+import System.Process qualified as Process
 import Prelude hiding (return)
 
 repld :: IO ()
@@ -48,25 +48,14 @@ app = do
           io (hPutStrLn stderr "repld is already running.")
           return 1
 
-    let replConfig :: Process.ProcessConfig Handle () ()
-        replConfig =
-          Process.shell command
-            & Process.setDelegateCtlc True
-            & Process.setStdin Process.createPipe
-
-    with (Process.withProcessWait replConfig) \repl -> do
-      let tellRepl = Text.hPutStr (Process.getStdin repl)
-      let tellReplLn = Text.hPutStrLn (Process.getStdin repl)
-
-      io (hSetBuffering (Process.getStdin repl) NoBuffering)
-
+    with (withRepl command) \repl -> do
       with Ki.scoped \scope -> do
         io do
           Ki.fork_ scope do
             runServer socketPath \case
-              Socket.Frame "send" bytes -> do
-                Text.putStr bytes
-                tellRepl bytes
+              Socket.Frame "send" string -> do
+                Text.putStr string
+                sendToRepl repl string
                 pure (Socket.Frame "send" "")
               _ -> pure (Socket.Frame "error" "unrecognized frame")
         _ <-
@@ -75,13 +64,49 @@ app = do
               let loop :: Haskeline.InputT IO ()
                   loop =
                     whenJustM (Haskeline.getInputLine "") \line -> do
-                      liftIO (tellReplLn (Text.pack line))
+                      liftIO (sendToRepl repl (Text.pack line <> "\n"))
                       loop
               Haskeline.runInputT Haskeline.defaultSettings loop
-              hClose (Process.getStdin repl)
-        Process.waitExitCode repl >>= \case
+              closeReplStdin repl
+        io (getReplExitCode repl) >>= \case
           ExitSuccess -> pure 0
           ExitFailure _code -> return 1
+
+data Repl = Repl
+  { replHandle :: Process.ProcessHandle,
+    replStdin :: Handle
+  }
+
+withRepl :: String -> (Repl -> IO a) -> IO a
+withRepl command action =
+  bracket acquire release action
+  where
+    acquire :: IO Repl
+    acquire = do
+      (Just replStdin, _, _, replHandle) <-
+        Process.createProcess
+          (Process.shell command)
+            { Process.delegate_ctlc = True,
+              Process.std_in = Process.CreatePipe
+            }
+      hSetBuffering replStdin NoBuffering
+      pure Repl {replHandle, replStdin}
+
+    release :: Repl -> IO ()
+    release Repl {replHandle} =
+      Process.terminateProcess replHandle
+
+sendToRepl :: Repl -> Text -> IO ()
+sendToRepl Repl {replStdin} =
+  Text.hPutStr replStdin
+
+closeReplStdin :: Repl -> IO ()
+closeReplStdin Repl {replStdin} =
+  hClose replStdin
+
+getReplExitCode :: Repl -> IO ExitCode
+getReplExitCode Repl {replHandle} =
+  Process.waitForProcess replHandle
 
 repldSend :: IO ()
 repldSend = do
