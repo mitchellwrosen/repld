@@ -12,7 +12,6 @@ import Repld.App
 import Repld.Prelude
 import Repld.Server (runServer)
 import Repld.Socket qualified as Socket
-import System.Console.ANSI qualified as Console
 import System.Console.Haskeline qualified as Haskeline
 import System.Directory (XdgDirectory (XdgData), createDirectoryIfMissing, doesFileExist, getXdgDirectory)
 import System.Environment (getArgs, lookupEnv)
@@ -56,32 +55,33 @@ app = do
             & Process.setStdin Process.createPipe
 
     with (Process.withProcessWait replConfig) \repl -> do
+      let tellRepl = Text.hPutStr (Process.getStdin repl)
+      let tellReplLn = Text.hPutStrLn (Process.getStdin repl)
+
       io (hSetBuffering (Process.getStdin repl) NoBuffering)
 
       with Ki.scoped \scope -> do
-        _ <-
-          io do
-            Ki.fork @() scope do
-              runServer socketPath \case
-                Socket.Frame "send" bytes -> do
-                  Console.setCursorPosition 0 0
-                  Console.clearFromCursorToScreenEnd
-                  Text.hPutStr (Process.getStdin repl) bytes
-                  pure (Socket.Frame "send" "")
-                _ -> pure (Socket.Frame "error" "unrecognized frame")
+        io do
+          Ki.fork_ scope do
+            runServer socketPath \case
+              Socket.Frame "send" bytes -> do
+                Text.putStr bytes
+                tellRepl bytes
+                pure (Socket.Frame "send" "")
+              _ -> pure (Socket.Frame "error" "unrecognized frame")
         _ <-
           io do
             Ki.fork @() scope do
               let loop :: Haskeline.InputT IO ()
                   loop =
                     whenJustM (Haskeline.getInputLine "") \line -> do
-                      liftIO (Text.hPutStrLn (Process.getStdin repl) (Text.pack line))
+                      liftIO (tellReplLn (Text.pack line))
                       loop
               Haskeline.runInputT Haskeline.defaultSettings loop
               hClose (Process.getStdin repl)
         Process.waitExitCode repl >>= \case
           ExitSuccess -> pure 0
-          ExitFailure code -> return code
+          ExitFailure _code -> return 1
 
 repldSend :: IO ()
 repldSend = do
