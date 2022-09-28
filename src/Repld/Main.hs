@@ -84,11 +84,7 @@ withRepl command action =
     acquire :: IO Repl
     acquire = do
       (Just replStdin, _, _, replHandle) <-
-        Process.createProcess
-          (Process.shell command)
-            { Process.delegate_ctlc = True,
-              Process.std_in = Process.CreatePipe
-            }
+        Process.createProcess (Process.shell command) {Process.std_in = Process.CreatePipe}
       hSetBuffering replStdin NoBuffering
       pure Repl {replHandle, replStdin}
 
