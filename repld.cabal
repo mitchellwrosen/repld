@@ -5,26 +5,14 @@ version: 0
 
 common component
   build-depends:
-    base ^>= 4.14 || ^>= 4.15 || ^>= 4.16,
+    base ^>= 4.14 || ^>= 4.15 || ^>= 4.16 || ^>= 4.17 || ^>= 4.18,
   default-extensions:
     BlockArguments
     DefaultSignatures
-    DeriveFunctor
     DerivingStrategies
-    FlexibleContexts
-    FlexibleInstances
-    ImportQualifiedPost
     LambdaCase
-    MultiParamTypeClasses
-    NamedFieldPuns
-    NumericUnderscores
     OverloadedStrings
-    RankNTypes
-    ScopedTypeVariables
-    TypeApplications
-    TypeFamilies
-    ViewPatterns
-  default-language: Haskell2010
+  default-language: GHC2021
   ghc-options: -Wall
 
 library
