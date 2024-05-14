@@ -12,13 +12,9 @@ module Repld.Socket
 where
 
 import Control.Exception.Safe (bracket, bracketOnError, bracket_, catchAny)
-import Data.Aeson qualified as Aeson (Value, json', pairs, withObject, (.=))
-import Data.Aeson.Encoding qualified as Aeson (encodingToLazyByteString)
-import Data.Aeson.Internal qualified as Aeson (iparse)
-import Data.Aeson.Parser qualified as Aeson (eitherDecodeStrictWith)
-import Data.Aeson.Types qualified as Aeson (Parser, parseField)
+import Cretheus.Decode qualified
+import Cretheus.Encode qualified
 import Data.ByteString qualified as ByteString
-import Data.ByteString.Lazy qualified as LazyByteString
 import Network.Socket (Socket)
 import Network.Socket qualified as Socket
   ( Family (AF_UNIX),
@@ -84,19 +80,18 @@ ignoringExceptions action =
 data Frame
   = Frame Text Text
 
-deserializeFrame :: ByteString -> Either String Frame
+deserializeFrame :: ByteString -> Either Text Frame
 deserializeFrame =
-  mapLeft snd . Aeson.eitherDecodeStrictWith Aeson.json' (Aeson.iparse parser)
-  where
-    parser :: Aeson.Value -> Aeson.Parser Frame
-    parser =
-      Aeson.withObject "frame" \object ->
-        Frame
-          <$> Aeson.parseField object "type"
-          <*> Aeson.parseField object "data"
+  Cretheus.Decode.fromBytes $
+    Cretheus.Decode.object do
+      type_ <- Cretheus.Decode.property "type" Cretheus.Decode.text
+      data_ <- Cretheus.Decode.property "data" Cretheus.Decode.text
+      pure (Frame type_ data_)
 
 serializeFrame :: Frame -> ByteString
 serializeFrame (Frame type_ data_) =
-  Aeson.pairs ("type" Aeson..= type_ <> "data" Aeson..= data_)
-    & Aeson.encodingToLazyByteString
-    & LazyByteString.toStrict
+  Cretheus.Encode.asBytes $
+    Cretheus.Encode.object
+      [ Cretheus.Encode.property "type" (Cretheus.Encode.text type_)
+      , Cretheus.Encode.property "data" (Cretheus.Encode.text data_)
+      ]

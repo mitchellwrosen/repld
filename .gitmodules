@@ -1,0 +1,3 @@
+[submodule "submodules/cretheus"]
+	path = submodules/cretheus
+	url = git@github.com:awkward-squad/cretheus
